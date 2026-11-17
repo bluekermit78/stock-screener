@@ -4,13 +4,17 @@ import numpy as np
 
 class IntradayAnalyzer:
     @staticmethod
-    def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d") -> tuple[pd.DataFrame, dict]:
+    def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d", include_prepost: bool = False) -> tuple[pd.DataFrame, dict]:
         t = yf.Ticker(ticker)
-        df_intra = t.history(period=period, interval=interval)
+        df_intra = t.history(period=period, interval=interval, prepost=include_prepost)
         df_daily = t.history(period="5d", interval="1d")
 
         if df_intra.empty or len(df_daily) < 2:
             return pd.DataFrame(), {}
+
+        # Zeitstempel konsequent auf deutsche Zeit (Europe/Berlin) umrechnen
+        if df_intra.index.tz is not None:
+            df_intra.index = df_intra.index.tz_convert("Europe/Berlin")
 
         prev_day = df_daily.iloc[-2]
         ph, pl, pc = float(prev_day['High']), float(prev_day['Low']), float(prev_day['Close'])
@@ -37,6 +41,7 @@ class IntradayAnalyzer:
         df_intra['Cum_TP_Vol'] = df_intra.groupby('Date')['TP_Vol'].cumsum()
         df_intra['Cum_Vol'] = df_intra.groupby('Date')['Volume'].cumsum()
         df_intra['VWAP'] = df_intra['Cum_TP_Vol'] / df_intra['Cum_Vol'].replace(0, np.nan)
+        df_intra['VWAP'] = df_intra['VWAP'].ffill()
 
         df_intra['EMA_9'] = df_intra['Close'].ewm(span=9, adjust=False).mean()
         df_intra['EMA_21'] = df_intra['Close'].ewm(span=21, adjust=False).mean()
@@ -121,6 +126,9 @@ class IntradayAnalyzer:
             action = "🔴 SHORT / Abwarten"
             sub_action = f"Unter VWAP-Tendenz (Score: {score}/100)"
 
+        # Zeitstempel lesbar in deutscher Zeit formatieren
+        ts_formatted = df_today.index[-1].strftime("%d.%m.%Y %H:%M Uhr (MEZ)")
+
         return {
             "price": round(price, 2),
             "vwap": round(vwap, 2),
@@ -133,5 +141,5 @@ class IntradayAnalyzer:
             "action": action,
             "sub_action": sub_action,
             "signals": signals,
-            "last_timestamp": str(df_today.index[-1])
+            "last_timestamp": ts_formatted
         }
