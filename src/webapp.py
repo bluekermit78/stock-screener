@@ -25,6 +25,19 @@ st.markdown("""
         padding-top: 2rem !important;
         max-width: 100% !important;
     }
+    /* Verhindert das Abschneiden (...) in st.metric und passt die Schriftgröße harmonisch an */
+    [data-testid="stMetricValue"] {
+        font-size: 1.35rem !important;
+        line-height: 1.3 !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word !important;
+    }
+    [data-testid="stMetricDelta"] {
+        font-size: 0.85rem !important;
+        white-space: normal !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,7 +119,6 @@ def plot_chart(df: pd.DataFrame, ticker: str):
     st.plotly_chart(fig, use_container_width=True)
 
 def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
-    # Letzte 2 Handelstage anzeigen für sauberen Blick auf den heutigen Tag + Vortagesschluss
     unique_dates = df_intra['Date'].unique()
     recent_dates = unique_dates[-2:] if len(unique_dates) >= 2 else unique_dates
     df_plot = df_intra[df_intra['Date'].isin(recent_dates)].copy()
@@ -131,22 +143,18 @@ def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_9'], line=dict(color='#00b4d8', width=1.3), name='EMA 9'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_21'], line=dict(color='#f77f00', width=1.3), name='EMA 21'), row=1, col=1)
 
-    # Horizontale Pivot- und ORB-Linien
     fig.add_hline(y=piv['R1'], line_dash="dot", line_color="#ef476f", annotation_text=f"R1 ({piv['R1']})", row=1, col=1)
     fig.add_hline(y=piv['P'], line_dash="dash", line_color="#adb5bd", annotation_text=f"Pivot ({piv['P']})", row=1, col=1)
     fig.add_hline(y=piv['S1'], line_dash="dot", line_color="#06d6a0", annotation_text=f"S1 ({piv['S1']})", row=1, col=1)
     fig.add_hline(y=eval_res['orb_high'], line_dash="dashdot", line_color="#118ab2", annotation_text=f"ORB High ({eval_res['orb_high']})", row=1, col=1)
     fig.add_hline(y=eval_res['orb_low'], line_dash="dashdot", line_color="#118ab2", annotation_text=f"ORB Low ({eval_res['orb_low']})", row=1, col=1)
 
-    # Volumen
     fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name='Volumen', marker_color='#4cc9f0'), row=2, col=1)
 
-    # RSI
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['RSI'], line=dict(color='#9b5de5', width=1.5), name='Intraday RSI'), row=3, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
 
-    # Wochenend- und Nacht-Lücken ausblenden
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
     fig.update_layout(height=740, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
     st.plotly_chart(fig, use_container_width=True)
@@ -323,32 +331,35 @@ with tab1:
                 ic1.metric(
                     "Intraday-Signal (5m)",
                     intra_eval['action'],
-                    f"Intraday-Score: {intra_eval['score']} / 100",
+                    intra_eval.get('sub_action', f"Score: {intra_eval['score']} / 100"),
+                    delta_color="off",
                     help="Kombiniertes Signal aus VWAP-Position, 30m Opening Range Breakout, EMA 9/21 und 5m-RSI."
                 )
                 ic2.metric(
                     "Kurs vs. Tages-VWAP",
-                    f"{intra_eval['price']} {cur}",
-                    f"{vwap_diff_pct:+.2f}% zum VWAP ({intra_eval['vwap']} {cur})",
+                    f"{intra_eval['price']:.2f} {cur}",
+                    f"{vwap_diff_pct:+.2f}% zum VWAP ({intra_eval['vwap']:.2f} {cur})",
                     help="Notiert der Kurs über dem VWAP, haben institutionelle Käufer im heutigen Handelsverlauf das Übergewicht."
                 )
                 ic3.metric(
                     "Opening Range (erste 30 Min)",
-                    f"{intra_eval['orb_low']} – {intra_eval['orb_high']} {cur}",
+                    f"{intra_eval['orb_low']:.2f} – {intra_eval['orb_high']:.2f} {cur}",
                     f"RVOL: {intra_eval['rvol']}x | RSI(5m): {intra_eval['rsi']}",
+                    delta_color="off",
                     help="Spanne der ersten 30 Handelsminuten. Ausbrüche darüber (ORB High) oder darunter (ORB Low) liefern starke Richtungsimpulse."
                 )
                 ic4.metric(
                     "Tages-Pivot & Schlüsselzonen",
-                    f"Pivot: {pivots['P']} {cur}",
-                    f"Support S1: {pivots['S1']} | Widerstand R1: {pivots['R1']}",
+                    f"Pivot: {pivots['P']:.2f} {cur}",
+                    f"S1: {pivots['S1']:.2f} | R1: {pivots['R1']:.2f}",
+                    delta_color="off",
                     help=f"Klassische Floor-Pivots aus dem Vortag (S2: {pivots['S2']} | S1: {pivots['S1']} | P: {pivots['P']} | R1: {pivots['R1']} | R2: {pivots['R2']})."
                 )
 
                 st.info(
                     f"**🎯 Aktuelle Intraday-Einschätzung (Stand: {intra_eval['last_timestamp']}):**\n\n" +
                     "\n".join([f"- {s}" for s in intra_eval['signals']]) +
-                    f"\n\n**📌 Intraday-Fahrplan:** Solange der Kurs über dem **VWAP ({intra_eval['vwap']} {cur})** bzw. über **Pivot P ({pivots['P']} {cur})** handelt, liegen die nächsten Tagesziele bei **R1 ({pivots['R1']} {cur})** und **R2 ({pivots['R2']} {cur})**. Ein Rückfall unter das **ORB-Tief ({intra_eval['orb_low']} {cur})** aktiviert die Unterstützung bei **S1 ({pivots['S1']} {cur})**."
+                    f"\n\n**📌 Intraday-Fahrplan:** Solange der Kurs über dem **VWAP ({intra_eval['vwap']:.2f} {cur})** bzw. über **Pivot P ({pivots['P']:.2f} {cur})** handelt, liegen die nächsten Tagesziele bei **R1 ({pivots['R1']:.2f} {cur})** und **R2 ({pivots['R2']:.2f} {cur})**. Ein Rückfall unter das **ORB-Tief ({intra_eval['orb_low']:.2f} {cur})** aktiviert die Unterstützung bei **S1 ({pivots['S1']:.2f} {cur})**."
                 )
 
                 plot_intraday_chart(df_intra, intra_eval, selected_ticker)

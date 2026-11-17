@@ -6,14 +6,12 @@ class IntradayAnalyzer:
     @staticmethod
     def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d") -> tuple[pd.DataFrame, dict]:
         t = yf.Ticker(ticker)
-        # 5-Tage-Historie auf 5m-Basis für saubere EMA/RSI-Glättung + Vortageswerte für Pivot-Punkte
         df_intra = t.history(period=period, interval=interval)
         df_daily = t.history(period="5d", interval="1d")
 
         if df_intra.empty or len(df_daily) < 2:
             return pd.DataFrame(), {}
 
-        # Vortagesdaten (High, Low, Close) für klassische Floor-Pivots
         prev_day = df_daily.iloc[-2]
         ph, pl, pc = float(prev_day['High']), float(prev_day['Low']), float(prev_day['Close'])
         pivot = (ph + pl + pc) / 3.0
@@ -32,7 +30,6 @@ class IntradayAnalyzer:
         }
 
         df_intra = df_intra.copy()
-        # Datum extrahieren, um den VWAP täglich beim Handelsstart neu zu starten (Anchored Daily VWAP)
         df_intra['Date'] = df_intra.index.date
         df_intra['Typical_Price'] = (df_intra['High'] + df_intra['Low'] + df_intra['Close']) / 3.0
         df_intra['TP_Vol'] = df_intra['Typical_Price'] * df_intra['Volume']
@@ -41,18 +38,15 @@ class IntradayAnalyzer:
         df_intra['Cum_Vol'] = df_intra.groupby('Date')['Volume'].cumsum()
         df_intra['VWAP'] = df_intra['Cum_TP_Vol'] / df_intra['Cum_Vol'].replace(0, np.nan)
 
-        # Schnelle Intraday-EMAs (9 und 21 Perioden)
         df_intra['EMA_9'] = df_intra['Close'].ewm(span=9, adjust=False).mean()
         df_intra['EMA_21'] = df_intra['Close'].ewm(span=21, adjust=False).mean()
 
-        # Intraday RSI (14 Kerzen)
         delta = df_intra['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss.replace(0, np.nan)
         df_intra['RSI'] = 100 - (100 / (1 + rs))
 
-        # Relatives Volumen (aktuelle Kerze vs. 20-Kerzen-Schnitt)
         vol_ma = df_intra['Volume'].rolling(window=20).mean().replace(0, np.nan)
         df_intra['RVOL'] = round(df_intra['Volume'] / vol_ma, 2)
 
@@ -63,7 +57,6 @@ class IntradayAnalyzer:
         if df_intra.empty:
             return None
 
-        # Nur Kerzen des letzten/aktuellen Handelstages für Opening Range (erste 6 Kerzen à 5m = 30 Min)
         latest_date = df_intra['Date'].iloc[-1]
         df_today = df_intra[df_intra['Date'] == latest_date]
 
@@ -81,7 +74,6 @@ class IntradayAnalyzer:
         score = 50
         signals = []
 
-        # 1. VWAP-Position
         if price > vwap:
             score += 15
             signals.append(f"Kurs über Tages-VWAP ({vwap:.2f} {currency}) – Käufer dominieren")
@@ -89,7 +81,6 @@ class IntradayAnalyzer:
             score -= 15
             signals.append(f"Kurs unter Tages-VWAP ({vwap:.2f} {currency}) – Verkaufsdruck")
 
-        # 2. Opening Range Breakout (30 Min)
         if len(df_today) > 6:
             if price > orb_high:
                 score += 20
@@ -100,14 +91,12 @@ class IntradayAnalyzer:
             else:
                 signals.append(f"Innerhalb der Opening Range ({orb_low:.2f} – {orb_high:.2f} {currency})")
 
-        # 3. Schnelles EMA-Cross (9 > 21)
         if ema9 > ema21:
             score += 10
             signals.append("Kurzfrist-Momentum positiv (EMA 9 > EMA 21)")
         else:
             score -= 10
 
-        # 4. RSI & Pullback-Chancen
         if rsi < 30 and price > pivots['S1']:
             score += 15
             signals.append(f"Intraday überverkauft (RSI {rsi:.0f}) nahe Support S1 ({pivots['S1']} {currency})")
@@ -115,19 +104,22 @@ class IntradayAnalyzer:
             score -= 15
             signals.append(f"Intraday heißgelaufen (RSI {rsi:.0f}) – Gewinnmitnahmen drohen")
 
-        # 5. Volumen-Bestätigung
         if rvol >= 1.5:
             signals.append(f"Hohes relatives Volumen ({rvol:.1f}x Durchschnitt) bestätigt Bewegung")
 
         score = max(0, min(100, score))
         if score >= 70:
-            action = "🟢 Intraday LONG (Momentum / Breakout)"
+            action = "🟢 Intraday LONG"
+            sub_action = f"Momentum / Breakout (Score: {score}/100)"
         elif score >= 55:
-            action = "🟢 Leicht Bullisch (Dip an VWAP/EMA9 kaufen)"
+            action = "🟢 Leicht Bullisch"
+            sub_action = f"Dip an VWAP kaufen (Score: {score}/100)"
         elif score >= 45:
-            action = "🟡 Neutral / Seitwärts (Range-Trading)"
+            action = "🟡 Neutral / Range"
+            sub_action = f"Seitwärtsbewegung (Score: {score}/100)"
         else:
-            action = "🔴 Intraday SHORT / Abwarten (Unter VWAP)"
+            action = "🔴 SHORT / Abwarten"
+            sub_action = f"Unter VWAP-Tendenz (Score: {score}/100)"
 
         return {
             "price": round(price, 2),
@@ -139,6 +131,7 @@ class IntradayAnalyzer:
             "pivots": pivots,
             "score": score,
             "action": action,
+            "sub_action": sub_action,
             "signals": signals,
             "last_timestamp": str(df_today.index[-1])
         }
