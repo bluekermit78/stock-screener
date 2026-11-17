@@ -57,7 +57,7 @@ def compact_verdict(v: str) -> str:
          .replace("Verkauf / Meiden", "Meiden")
     )
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=120)
 def fetch_single_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     df = yf.Ticker(ticker).history(period=period)
     if not df.empty:
@@ -167,18 +167,18 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
         return
 
     cur = sel_data['currency']
-    price = sel_data['price']
+    price = deriv['active_price']
 
     st.divider()
     st.markdown(f"#### 🎯 Derivate- & Hebel-Berater für **{sel_data['name']} ({sel_data['ticker']})**")
     st.caption(
-        f"**Optimale Instrumenten-Wahl aktuell:** **{deriv['best_instrument']}** — *{deriv['best_reason']}* "
-        f"(Historische Volatilität 20T: {deriv['hv_20']}% | Vola-Ratio HV20/HV100: {deriv['vola_ratio']} | Tages-ATR: {deriv['atr_pct']}%)"
+        f"**Berechnungsbasis:** **`{price:.2f} {cur}`** *({deriv['price_source']})* | "
+        f"**Optimale Instrumenten-Wahl:** **{deriv['best_instrument']}** — *{deriv['best_reason']}* "
+        f"(HV20: {deriv['hv_20']}% | Vola-Ratio: {deriv['vola_ratio']} | Tages-ATR: {deriv['atr_pct']}%)"
     )
 
     d_col1, d_col2, d_col3 = st.columns(3)
 
-    # Spalte 1: Knock-Out-Zertifikate (Intraday oder Swing je nach gewählter Ansicht)
     with d_col1:
         if is_intraday_view and deriv['intraday_ko']:
             iko = deriv['intraday_ko']
@@ -201,7 +201,6 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
                 f"- **Swing-Kursziel (3.5x ATR):** `{sko['target']:.2f} {cur}`"
             )
 
-    # Spalte 2: Klassische Optionsscheine (Warrants)
     with d_col2:
         w = deriv['warrant']
         st.warning(
@@ -213,7 +212,6 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             f"- **Laufzeit-Regel:** {w['min_expiry']}"
         )
 
-    # Spalte 3: Faktor-Zertifikate
     with d_col3:
         f = deriv['faktor']
         st.success(
@@ -223,12 +221,11 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             f"- **Wichtige Handelsregel:** {f['note']}"
         )
 
-    # Interaktiver Positionsgrößen- & Derivate-Stop-Rechner
-    with st.expander("🧮 Interaktiver Positionsgrößen- & Knock-Out-Risiko-Rechner (für deinen Broker)", expanded=False):
+    with st.expander(f"🧮 Interaktiver Positionsgrößen- & Knock-Out-Risiko-Rechner (Basiswert aktuell: {price:.2f} {cur})", expanded=False):
         rc1, rc2, rc3 = st.columns(3)
         active_ko = deriv['intraday_ko'] if (is_intraday_view and deriv['intraday_ko']) else deriv['swing_ko']
         with rc1:
-            max_risk_eur = st.number_input("Maximaler Verlust pro Trade (in €):", min_value=20, max_value=10000, value=150, step=25, key=f"risk_{sel_data['ticker']}_{is_intraday_view}")
+            max_risk_eur = st.number_input("Maximaler Verlust pro Trade (in €):", min_value=10, max_value=10000, value=50, step=10, key=f"risk_{sel_data['ticker']}_{is_intraday_view}")
         with rc2:
             chosen_lev = st.number_input("Gewählter Hebel des Knock-Outs:", min_value=1.5, max_value=30.0, value=float(active_ko['leverage']), step=0.5, key=f"lev_{sel_data['ticker']}_{is_intraday_view}")
         with rc3:
@@ -383,8 +380,13 @@ with tab1:
         df_hist_selected = fetch_single_history(selected_ticker)
 
         if sel_data and analysis_mode.startswith("📊"):
+            # Auch im Swing-Modus die aktuellste 5m-Kerze abrufen, damit Derivate mit Echtzeitkurs rechnen
+            df_intra_live, pivots_live = fetch_cached_intraday(selected_ticker, interval="5m", include_prepost=not selected_ticker.endswith(".DE"))
+            intra_eval_live = IntradayAnalyzer.evaluate_intraday(df_intra_live, pivots_live, currency=sel_data['currency'])
+            live_price_display = intra_eval_live['price'] if intra_eval_live else sel_data['price']
+
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Aktueller Kurs", f"{sel_data['price']} {sel_data['currency']}", f"{sel_data['perf']['1M']}% (1M)")
+            c1.metric("Aktueller Kurs (Live)", f"{live_price_display} {sel_data['currency']}", f"{sel_data['perf']['1M']}% (1M)")
             c2.metric("Gesamt-Empfehlung", sel_data['overall_verdict'], f"Score: {sel_data['total_score']} / 100")
             c3.metric("Empfohlener Stop-Loss (2x ATR)", f"{sel_data['stop_loss']} {sel_data['currency']}")
             c4.metric("Technisches Kursziel (3.5x ATR)", f"{sel_data['take_profit']} {sel_data['currency']}")
@@ -400,7 +402,7 @@ with tab1:
                 st.success(f"**🏛️ Langfristig (6+ Monate): {sel_data['long_term']['verdict']} ({sel_data['long_term']['score']}/100)**\n\n" +
                            ("\n".join([f"- {x}" for x in sel_data['long_term']['reasons']]) or "- Neutrale Bewertung"))
 
-            render_derivatives_panel(df_hist_selected, sel_data, intra_eval=None, is_intraday_view=False)
+            render_derivatives_panel(df_hist_selected, sel_data, intra_eval=intra_eval_live, is_intraday_view=False)
             plot_chart(df_hist_selected, selected_ticker)
 
         elif sel_data and analysis_mode.startswith("⚡"):

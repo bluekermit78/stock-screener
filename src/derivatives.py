@@ -7,7 +7,14 @@ class DerivativesAdvisor:
         if df.empty or len(df) < 30:
             return None
 
-        close = float(multi_data['price'])
+        # Nutze den aktuellsten Intraday-/Pre-Market-Kurs, falls vorhanden; sonst EOD/15m-Kurs
+        if intra_data and intra_data.get('price'):
+            close = float(intra_data['price'])
+            price_source = f"Live Intraday (5m Kerze: {intra_data.get('last_timestamp', 'aktuell')})"
+        else:
+            close = float(multi_data['price'])
+            price_source = "Tageschart (15 Min Cache / letzter regulärer Kurs)"
+
         atr = float(multi_data['atr'])
         cur = multi_data['currency']
         atr_pct = (atr / close) * 100
@@ -26,7 +33,6 @@ class DerivativesAdvisor:
 
         # --- 1. KNOCK-OUT-ZERTIFIKATE (SWING & INTRADAY) ---
         if is_bullish:
-            # Swing: Mentaler Stop bei 2.0x ATR, KO-Barriere mit Puffer bei 3.2x ATR unter Kurs
             swing_sl_underlying = round(close - (2.0 * atr), 2)
             swing_ko_barrier = round(close - (3.2 * atr), 2)
             swing_tp_underlying = round(close + (3.5 * atr), 2)
@@ -39,21 +45,26 @@ class DerivativesAdvisor:
         recommended_swing_lev = round(1.0 / ko_distance_pct, 1) if ko_distance_pct > 0 else 5.0
         recommended_swing_lev = min(15.0, max(2.0, recommended_swing_lev))
 
-        # Intraday-Knock-Out (falls Intraday-Daten vorliegen)
+        # Intraday-Knock-Out mit Sicherheits-Mindestabstand für den mentalen Stop-Loss
         intra_ko_info = {}
         if intra_data and 'pivots' in intra_data:
             piv = intra_data['pivots']
             intra_bull = intra_data['score'] >= 50
             intra_dir = "LONG (Turbo Bull)" if intra_bull else "SHORT (Turbo Bear)"
+            min_sl_buffer = max(close * 0.012, 0.6 * atr)  # Mindestens 1,2 % oder 0,6x ATR Abstand
+
             if intra_bull:
-                # KO-Barriere knapp unter S2 (oder 1.8x ATR), Mentaler Stop unter VWAP / S1
-                intra_sl = min(intra_data['orb_low'], piv['S1'])
-                intra_ko = round(min(piv['S2'], close - (1.8 * atr)), 2)
-                intra_tp = piv['R1'] if close < piv['R1'] else piv['R2']
+                raw_sl = min(intra_data['orb_low'], piv['S1'])
+                intra_sl = min(raw_sl, close - min_sl_buffer)
+                intra_ko = round(min(piv['S2'], close - (2.0 * atr), intra_sl - (1.0 * atr)), 2)
+                raw_tp = piv['R1'] if close < piv['R1'] * 0.99 else piv['R2']
+                intra_tp = max(raw_tp, close + (1.2 * atr))
             else:
-                intra_sl = max(intra_data['orb_high'], piv['R1'])
-                intra_ko = round(max(piv['R2'], close + (1.8 * atr)), 2)
-                intra_tp = piv['S1'] if close > piv['S1'] else piv['S2']
+                raw_sl = max(intra_data['orb_high'], piv['R1'])
+                intra_sl = max(raw_sl, close + min_sl_buffer)
+                intra_ko = round(max(piv['R2'], close + (2.0 * atr), intra_sl + (1.0 * atr)), 2)
+                raw_tp = piv['S1'] if close > piv['S1'] * 1.01 else piv['S2']
+                intra_tp = min(raw_tp, close - (1.2 * atr))
 
             intra_dist = max(0.015, abs(close - intra_ko) / close)
             intra_lev = min(20.0, max(3.0, round(1.0 / intra_dist, 1)))
@@ -67,7 +78,6 @@ class DerivativesAdvisor:
             }
 
         # --- 2. KLASSISCHE OPTIONSSCHEINE (WARRANTS) ---
-        # Strike leicht im Geld (Delta ~0.60) für geringeren Zeitwertverlust
         warrant_strike = round(close * (0.97 if is_bullish else 1.03), 1)
         if vola_ratio < 0.95:
             warrant_status = "🟢 Günstig (Niedrige Volatilität – Einstieg vor Vola-Anstieg ideal)"
@@ -87,7 +97,6 @@ class DerivativesAdvisor:
             faktor_lev = "Max. 2x (besser KO-Zertifikat)"
             faktor_note = "Bei schwankenden oder richtungslosen Kursen frisst die tägliche Hebel-Neufestsetzung das Kapital auf."
 
-        # Beste Produktklasse für die aktuelle Marktlage küren
         if vola_ratio > 1.15:
             best_instrument = "Knock-Out-Zertifikat (Open-End Turbo)"
             best_reason = "Die aktuelle Schwankungsbreite (Volatilität) ist erhöht – Knock-Outs leiden im Gegensatz zu Optionsscheinen nicht unter teurem Aufgeld (Vega) und haben keine Pfadabhängigkeit."
@@ -99,6 +108,8 @@ class DerivativesAdvisor:
             best_reason = "Ruhige Volatilitätsphase (HV20/HV100 = " + str(vola_ratio) + ") erlaubt günstige Einstiege in Optionsscheine ohne Knock-Out-Risiko."
 
         return {
+            "active_price": round(close, 2),
+            "price_source": price_source,
             "direction": direction,
             "is_bullish": is_bullish,
             "hv_20": round(hv_20, 1),
