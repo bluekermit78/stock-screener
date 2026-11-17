@@ -68,6 +68,16 @@ def fetch_single_history(ticker: str, period: str = "2y") -> pd.DataFrame:
 def fetch_cached_intraday(ticker: str, interval: str = "5m", include_prepost: bool = False):
     return IntradayAnalyzer.fetch_intraday_data(ticker, interval=interval, period="5d", include_prepost=include_prepost)
 
+@st.cache_data(ttl=300)
+def fetch_eur_usd_rate() -> float:
+    try:
+        df_fx = yf.Ticker("EURUSD=X").history(period="1d")
+        if not df_fx.empty:
+            return float(df_fx['Close'].iloc[-1])
+    except Exception:
+        pass
+    return 1.08
+
 @st.cache_data(ttl=3600)
 def fetch_fundamentals(ticker: str) -> dict:
     try:
@@ -168,13 +178,14 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
 
     cur = sel_data['currency']
     price = deriv['active_price']
+    eur_usd = fetch_eur_usd_rate() if cur == "$" else 1.0
 
     st.divider()
     st.markdown(f"#### 🎯 Derivate- & Hebel-Berater für **{sel_data['name']} ({sel_data['ticker']})**")
+    fx_info = f" | **EUR/USD Live:** `{eur_usd:.4f}`" if cur == "$" else ""
     st.caption(
-        f"**Berechnungsbasis:** **`{price:.2f} {cur}`** *({deriv['price_source']})* | "
-        f"**Optimale Instrumenten-Wahl:** **{deriv['best_instrument']}** — *{deriv['best_reason']}* "
-        f"(HV20: {deriv['hv_20']}% | Vola-Ratio: {deriv['vola_ratio']} | Tages-ATR: {deriv['atr_pct']}%)"
+        f"**Berechnungsbasis:** **`{price:.2f} {cur}`** *({deriv['price_source']})*{fx_info} | "
+        f"**Beste Produktklasse aktuell:** **{deriv['best_instrument']}** — *{deriv['best_reason']}*"
     )
 
     d_col1, d_col2, d_col3 = st.columns(3)
@@ -185,10 +196,10 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             st.info(
                 f"**⚡ 1. Intraday Knock-Out (Turbo)**\n\n"
                 f"- **Ausrichtung:** `{iko['direction']}`\n"
-                f"- **Max. empfohlener Hebel:** **`{iko['leverage']}x`**\n"
-                f"- **Max. KO-Schwelle (Basispreis):** `{iko['ko_barrier']:.2f} {cur}` *(Abstand: {iko['dist_pct']}%)*\n"
-                f"- **Mentaler Stop-Loss (Basiswert):** `{iko['mental_sl']:.2f} {cur}` *(vor KO verkaufen!)*\n"
-                f"- **Intraday-Kursziel (Basiswert):** `{iko['target']:.2f} {cur}`"
+                f"- **Empfohlener Hebel:** **`{iko['leverage']}x`**\n"
+                f"- **Max. KO-Schwelle:** `{iko['ko_barrier']:.2f} {cur}` *(Puffer: {iko['dist_pct']}%)*\n"
+                f"- **Mentaler Stop-Loss (Aktie):** `{iko['mental_sl']:.2f} {cur}`\n"
+                f"- **Intraday-Kursziel (Aktie):** `{iko['target']:.2f} {cur}`"
             )
         else:
             sko = deriv['swing_ko']
@@ -196,8 +207,8 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
                 f"**🔥 1. Swing Knock-Out (Open-End Turbo)**\n\n"
                 f"- **Ausrichtung:** `{deriv['direction']}`\n"
                 f"- **Empfohlener Hebel:** **`{sko['leverage']}x`**\n"
-                f"- **Sichere KO-Barriere (3.2x ATR):** `{sko['ko_barrier']:.2f} {cur}` *(Abstand: {sko['dist_pct']}%)*\n"
-                f"- **Mentaler Stop-Loss (2.0x ATR):** `{sko['mental_sl']:.2f} {cur}` *(schützt vor Totalverlust)*\n"
+                f"- **Sichere KO-Schwelle (3.2x ATR):** `{sko['ko_barrier']:.2f} {cur}` *(Puffer: {sko['dist_pct']}%)*\n"
+                f"- **Mentaler Stop-Loss (2.0x ATR):** `{sko['mental_sl']:.2f} {cur}`\n"
                 f"- **Swing-Kursziel (3.5x ATR):** `{sko['target']:.2f} {cur}`"
             )
 
@@ -221,40 +232,181 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             f"- **Wichtige Handelsregel:** {f['note']}"
         )
 
-    with st.expander(f"🧮 Interaktiver Positionsgrößen- & Knock-Out-Risiko-Rechner (Basiswert aktuell: {price:.2f} {cur})", expanded=False):
-        rc1, rc2, rc3 = st.columns(3)
-        active_ko = deriv['intraday_ko'] if (is_intraday_view and deriv['intraday_ko']) else deriv['swing_ko']
-        with rc1:
-            max_risk_eur = st.number_input("Maximaler Verlust pro Trade (in €):", min_value=10, max_value=10000, value=50, step=10, key=f"risk_{sel_data['ticker']}_{is_intraday_view}")
-        with rc2:
-            chosen_lev = st.number_input("Gewählter Hebel des Knock-Outs:", min_value=1.5, max_value=30.0, value=float(active_ko['leverage']), step=0.5, key=f"lev_{sel_data['ticker']}_{is_intraday_view}")
-        with rc3:
-            cert_price = st.number_input("Aktueller Briefkurs des Zertifikats (in €):", min_value=0.10, max_value=100.0, value=2.50, step=0.10, key=f"cprice_{sel_data['ticker']}_{is_intraday_view}")
+    # --- SCALABLE CAPITAL INTERAKTIVER ORDER-ASSISTENT ---
+    active_ko = deriv['intraday_ko'] if (is_intraday_view and deriv['intraday_ko']) else deriv['swing_ko']
+    default_is_long = "LONG" in active_ko.get('direction', deriv['direction'])
+    key_prefix = f"sc_{sel_data['ticker']}_{'intra' if is_intraday_view else 'swing'}"
 
-        sl_move_pct = abs(price - active_ko['mental_sl']) / price
-        tp_move_pct = abs(active_ko['target'] - price) / price
-        cert_loss_pct = min(0.99, sl_move_pct * chosen_lev)
-        cert_gain_pct = tp_move_pct * chosen_lev
+    with st.expander(f"📱 Scalable Capital Knock-Out Order-Assistent (Schritt-für-Schritt Eingabehilfe | Basiswert: {price:.2f} {cur})", expanded=True):
+        st.markdown(
+            f"**Schritt 1 – Zertifikate-Filter in Scalable Capital öffnen (`Derivate` ➔ `{sel_data['name']}`):**\n"
+            f"1. **Richtung wählen:** `{'Long' if default_is_long else 'Short'}` | **Hebel-Filter einstellen:** ca. `{max(2.0, round(active_ko['leverage']-2, 0)):.0f}x bis {round(active_ko['leverage']+2, 0):.0f}x`\n"
+            f"2. **Nach Knock-Out-Schwelle in {cur} schauen:** Bei **Long** muss die KO-Schwelle **unter `{active_ko['ko_barrier']:.2f} {cur}`** liegen (bei Short über `{active_ko['ko_barrier']:.2f} {cur}`).\n"
+            f"3. Wähle ein Zertifikat (z. B. von BNP, HSBC, Vontobel oder UniCredit) aus der Liste und trage seine **KO-Schwelle** sowie den **Briefkurs (Kaufpreis in €)** hier unten ein:"
+        )
 
-        max_position_eur = round(max_risk_eur / cert_loss_pct, 2) if cert_loss_pct > 0 else 0.0
-        shares_count = int(max_position_eur // cert_price) if cert_price > 0 else 0
-        cert_sl_price = round(cert_price * (1.0 - cert_loss_pct), 2)
-        cert_tp_price = round(cert_price * (1.0 + cert_gain_pct), 2)
-        expected_profit_eur = round(shares_count * (cert_tp_price - cert_price), 2)
+        st.divider()
+        st.markdown("**Schritt 2 – Eckdaten deines ausgewählten Zertifikats eintragen:**")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1:
+            trade_dir = st.selectbox(
+                "Gewählte Richtung bei Scalable:",
+                ["Long (Steigende Kurse)", "Short (Fallende Kurse)"],
+                index=0 if default_is_long else 1,
+                key=f"{key_prefix}_dir"
+            )
+            is_long = trade_dir.startswith("Long")
+        with sc2:
+            default_ko = float(active_ko['ko_barrier']) if (is_long == default_is_long) else round(price * (0.88 if is_long else 1.12), 2)
+            user_ko_barrier = st.number_input(
+                f"KO-Schwelle des Zertifikats (in {cur}):",
+                min_value=1.0, max_value=100000.0, value=float(default_ko), step=0.5,
+                help=f"Steht im Namen des Zertifikats, z. B. 'NVIDIA Long 130,06 Turbo' -> 130.06 {cur}",
+                key=f"{key_prefix}_ko"
+            )
+        with sc3:
+            ratio = st.selectbox(
+                "Bezugsverhältnis (Standard 0,10):",
+                [0.10, 0.01, 1.00],
+                index=0,
+                help="Bei fast allen US- und DAX-Aktien (wie Nvidia, Apple, SAP) ist das Bezugsverhältnis 0,10 (10 Zertifikate beziehen sich auf 1 Aktie).",
+                key=f"{key_prefix}_ratio"
+            )
+            # Rechnerischer innerer Wert als sinnvoller Startwert für den Briefkurs
+            intrinsic_eur = max(0.15, (abs(price - user_ko_barrier) * ratio) / eur_usd)
+        with sc4:
+            cert_ask_eur = st.number_input(
+                "Aktueller Briefkurs / Kaufpreis (in €):",
+                min_value=0.05, max_value=500.0, value=round(intrinsic_eur + 0.04, 2), step=0.05,
+                help="Der aktuelle Preis in Euro für 1 Anteil bei Scalable Capital.",
+                key=f"{key_prefix}_ask"
+            )
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Max. Positionsgröße", f"{max_position_eur:.0f} €", f"{shares_count} Anteile à {cert_price:.2f} €", delta_color="off")
-        m2.metric("Stop-Loss im Zertifikat", f"{cert_sl_price:.2f} €", f"-{cert_loss_pct*100:.1f}% (bei Basiswert {active_ko['mental_sl']} {cur})", delta_color="inverse")
-        m3.metric("Kursziel im Zertifikat", f"{cert_tp_price:.2f} €", f"+{cert_gain_pct*100:.1f}% (bei Basiswert {active_ko['target']} {cur})")
-        m4.metric("Erwarteter Gewinn / Risiko", f"+{expected_profit_eur:.0f} €", f"Risiko: -{max_risk_eur:.0f} €", delta_color="off")
+        # Berechnung von Effektiv-Hebel, Innerem Wert und Aufgeld
+        stock_price_eur = price / eur_usd
+        eff_leverage = round((stock_price_eur * ratio) / cert_ask_eur, 2) if cert_ask_eur > 0 else 1.0
+        raw_intrinsic_eur = ((price - user_ko_barrier) * ratio / eur_usd) if is_long else ((user_ko_barrier - price) * ratio / eur_usd)
+        raw_intrinsic_eur = max(0.0, raw_intrinsic_eur)
+        premium_eur = round(cert_ask_eur - raw_intrinsic_eur, 2)
+        ko_dist_pct = ((price - user_ko_barrier) / price * 100) if is_long else ((user_ko_barrier - price) / price * 100)
+
+        if ko_dist_pct <= 0:
+            st.error(f"⚠️ Achtung: Die eingegebene KO-Schwelle ({user_ko_barrier:.2f} {cur}) wurde beim aktuellen Kurs ({price:.2f} {cur}) bereits erreicht oder verletzt!")
+            return
+
+        st.caption(
+            f"🔍 **Zertifikate-Check:** Realer Hebel: **`{eff_leverage:.2f}x`** | "
+            f"Abstand zum Knock-Out: **`{ko_dist_pct:.2f}%`** (`{abs(price - user_ko_barrier):.2f} {cur}`) | "
+            f"Rechnerischer innerer Wert: **`{raw_intrinsic_eur:.2f} €`** (Aufgeld/Finanzierung: `{premium_eur:+.2f} €` pro Schein)"
+        )
+
+        st.divider()
+        st.markdown("**Schritt 3 – Kauf-Parameter (Betrag / Stückzahl & Order-Typ) festlegen:**")
+        p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+        with p_col1:
+            sizing_mode = st.selectbox(
+                "Wie möchtest du die Größe bestimmen?",
+                ["1. Nach maximalem Risiko (in €)", "2. Fester Zielbetrag (Investition in €)", "3. Feste Stückzahl (Anteile)"],
+                key=f"{key_prefix}_smode"
+            )
+        with p_col2:
+            if sizing_mode.startswith("1."):
+                user_budget_val = st.number_input("Max. erlaubter Verlust bis Stop-Loss (€):", min_value=5.0, max_value=10000.0, value=25.0, step=5.0, key=f"{key_prefix}_rval")
+            elif sizing_mode.startswith("2."):
+                user_budget_val = st.number_input("Gewünschter Investitionsbetrag (€):", min_value=10.0, max_value=50000.0, value=300.0, step=25.0, key=f"{key_prefix}_ival")
+            else:
+                user_budget_val = st.number_input("Gewünschte Stückzahl (Anteile):", min_value=1, max_value=50000, value=100, step=10, key=f"{key_prefix}_sval")
+
+        # Sinnvolle Vorbelegung für Stop-Loss und Kursziel der Aktie
+        atr_val = float(sel_data['atr'])
+        default_sl_stock = float(active_ko['mental_sl']) if (is_long == default_is_long) else round(price - 1.5 * atr_val if is_long else price + 1.5 * atr_val, 2)
+        default_tp_stock = float(active_ko['target']) if (is_long == default_is_long) else round(price + 2.5 * atr_val if is_long else price - 2.5 * atr_val, 2)
+
+        with p_col3:
+            sl_stock = st.number_input(
+                f"Dein Stop-Loss im Aktienchart ({cur}):",
+                value=float(default_sl_stock), step=0.25,
+                help="Kurs der Aktie, bei dem du die Reißleine ziehst (muss vor der KO-Schwelle liegen!).",
+                key=f"{key_prefix}_slstock"
+            )
+        with p_col4:
+            entry_type = st.selectbox(
+                "Einstiegs-Art bei Scalable:",
+                ["Sofortkauf (nur LIMIT hinzufügen)", "Breakout-Kauf (STOP + LIMIT hinzufügen)"],
+                help="Sofortkauf = Du kaufst jetzt zum aktuellen Kurs mit Limit-Schutz. Breakout-Kauf = Order wird erst ausgelöst, wenn das Zertifikat über den STOP-Preis steigt.",
+                key=f"{key_prefix}_etype"
+            )
+
+        # Umrechnung des Aktien-Stop-Loss und Aktien-Kursziels in den Euro-Preis des Zertifikats
+        # Preisänderung des Zertifikats in € = (Kursänderung Aktie in USD * Bezugsverhältnis) / EURUSD
+        stock_diff_to_sl = abs(price - sl_stock)
+        cert_loss_per_share_eur = (stock_diff_to_sl * ratio) / eur_usd
+        cert_sl_eur = max(0.01, round(cert_ask_eur - cert_loss_per_share_eur, 2))
+        actual_loss_per_share = max(0.01, cert_ask_eur - cert_sl_eur)
+        cert_loss_pct = (actual_loss_per_share / cert_ask_eur) * 100
+
+        stock_diff_to_tp = abs(default_tp_stock - price)
+        cert_gain_per_share_eur = (stock_diff_to_tp * ratio) / eur_usd
+        cert_tp_eur = round(cert_ask_eur + cert_gain_per_share_eur, 2)
+        cert_gain_pct = (cert_gain_per_share_eur / cert_ask_eur) * 100
+
+        # Stückzahl und Investitionsbetrag je nach Modus berechnen
+        if sizing_mode.startswith("1."):
+            shares = max(1, int(user_budget_val // actual_loss_per_share))
+        elif sizing_mode.startswith("2."):
+            shares = max(1, int(user_budget_val // cert_ask_eur))
+        else:
+            shares = int(user_budget_val)
+
+        total_invest_eur = round(shares * cert_ask_eur, 2)
+        total_risk_eur = round(shares * actual_loss_per_share, 2)
+        total_profit_eur = round(shares * cert_gain_per_share_eur, 2)
+
+        # Berechnung für STOP hinzufügen & LIMIT hinzufügen beim Kauf
+        if entry_type.startswith("Sofortkauf"):
+            buy_stop_str = "Nicht aktivieren (leer lassen)"
+            # Enges Kauflimit (+1,0 % bzw. mind. +0,02 € über Briefkurs statt der teuren 4 % Scalable-Automatik)
+            buy_limit_eur = round(max(cert_ask_eur + 0.02, cert_ask_eur * 1.01), 2)
+            buy_mode_hint = f"Schützt dich vor Slippage (max. +1% über Briefkurs statt der 4% Standard-Toleranz)."
+        else:
+            # Breakout-Kauf: z. B. Ausbruch über ORB High (oder +0,5 % im Basiswert)
+            orb_trigger_stock = intra_eval['orb_high'] if (intra_eval and is_long and intra_eval['orb_high'] > price) else round(price * (1.005 if is_long else 0.995), 2)
+            diff_to_trigger = abs(orb_trigger_stock - price)
+            trigger_cert_eur = round(cert_ask_eur + ((diff_to_trigger * ratio) / eur_usd), 2)
+            buy_stop_str = f"{trigger_cert_eur:.2f} €"
+            buy_limit_eur = round(trigger_cert_eur + max(0.03, trigger_cert_eur * 0.01), 2)
+            buy_mode_hint = f"Aktiviert den Kauf erst, wenn die Aktie auf {orb_trigger_stock:.2f} {cur} ausbricht."
+
+        st.divider()
+        st.markdown("#### ✅ Schritt 4 – Deine exakten Eingabewerte für die Scalable Capital Ordermaske:")
+
+        out1, out2 = st.columns(2)
+        with out1:
+            st.info(
+                f"**🛒 A. Eingabe beim KAUF des Zertifikats:**\n\n"
+                f"- **Zielbetrag (Investition):** **`{total_invest_eur:.2f} €`** *(oder exakt **`{shares} Stück`** eingeben)*\n"
+                f"- **STOP hinzufügen (Aktivierungskurs):** **`{buy_stop_str}`**\n"
+                f"- **LIMIT hinzufügen (Max. Kaufpreis pro Stück):** **`{buy_limit_eur:.2f} €`**\n"
+                f"  *({buy_mode_hint})*"
+            )
+        with out2:
+            # Scalable verlangt bei Stop-Loss-Verkaufsorders einen Stop-Preis (Trigger) und ein leicht darunterliegendes Limit
+            sell_sl_limit_eur = max(0.01, round(cert_sl_eur - max(0.02, cert_sl_eur * 0.015), 2))
+            st.warning(
+                f"**🛡️ B. Eingabe direkt NACH dem Kauf (Verkaufs-Absicherung / Stop-Loss):**\n\n"
+                f"- **Stop-Loss STOP-Preis (Auslöser bei Aktie {sl_stock:.2f} {cur}):** **`{cert_sl_eur:.2f} €`** *(-{cert_loss_pct:.1f}%)*\n"
+                f"- **Stop-Loss LIMIT-Preis (Mindestverkaufspreis):** **`{sell_sl_limit_eur:.2f} €`** *(1,5% Puffer für sichere Ausführung)*\n"
+                f"- **Optionales Gewinnziel (Limit-Verkauf bei Aktie {default_tp_stock:.2f} {cur}):** **`{cert_tp_eur:.2f} €`** *(+{cert_gain_pct:.1f}%)*\n"
+                f"- **Dein exaktes Euro-Ergebnis:** Risiko bis Stop-Loss: **`-{total_risk_eur:.2f} €`** | Gewinn am Ziel: **`+{total_profit_eur:.2f} €`**"
+            )
 
 st.title("🏛️ Persönlicher Aktien- & Derivate-Anlageberater")
 st.markdown(
     "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)**, **fundamentale Bewertung** "
-    "und ein mathematisches **Derivate-Playbook (Knock-Outs, Optionsscheine, Faktor-Zertifikate)**."
+    "und einen **Scalable Capital Knock-Out Order-Assistenten** auf Echtzeit-Kursbasis."
 )
 
-with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Derivate-Regeln"):
+with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Scalable-Order-Typen"):
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         st.markdown("""
@@ -272,25 +424,25 @@ with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Deriva
         """)
     with col_g3:
         st.markdown("""
-        **🎯 Derivate-Regeln (KO, Optionsschein, Faktor)**
-        * **Knock-Out (Turbo):** Kein Volatilitäts-Risiko. Die KO-Schwelle muss immer weiter entfernt liegen als dein mentaler Stop-Loss (3.2x ATR vs. 2.0x ATR), um Overnight-Totalverluste zu verhindern.
-        * **Optionsschein (Warrant):** Nur bei niedriger Volatilität (`HV20/HV100 < 1.1`) kaufen. Delta **0.55–0.65** und **>4 Monate Laufzeit** schützen vor Zeitwertverfall (*Theta*).
-        * **Faktor-Zertifikat:** Wegen der täglichen Hebel-Anpassung (*Pfadabhängigkeit*) nur in starken, schwankungsarmen Trends nutzen!
+        **📱 Scalable Capital Order-Zusätze erklärt**
+        * **LIMIT hinzufügen (beim Kauf):** Legt fest, was du pro Zertifikat maximal bezahlst. Setze immer ein eigenes Limit (ca. 1 % über Briefkurs), statt die 4 %-Standard-Toleranz von Scalable zu nutzen.
+        * **STOP hinzufügen (beim Kauf = Stop-Buy):** Nützlich für Ausbrüche (Breakouts). Die Order schläft, bis das Zertifikat auf den STOP-Preis steigt, und kauft erst dann automatisch bis zum LIMIT-Preis.
+        * **Stop-Loss Limit (nach dem Kauf):** Sichert deine Position nach unten ab. Fällt der Schein auf den STOP-Kurs, wird er zum LIMIT-Kurs verkauft, bevor ein Knock-Out droht.
         """)
 
 config = load_config()
 current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'CARR', 'SAP.DE', 'SIE.DE'])]
 
 tab1, tab2, tab3 = st.tabs([
-    "🎯 Meine Fokus-Aktien (Multi-Horizont, Intraday & Derivate)",
+    "🎯 Meine Fokus-Aktien (Multi-Horizont, Intraday & Scalable-Assistent)",
     "🌍 Indizes & Markt-Kompass",
     "🔍 Gesamtmarkt-Screener (S&P 500 / DAX / MDAX)"
 ])
 
 with tab1:
-    st.subheader("Persönliche Watchlist, Chartanalyse & Derivate-Playbook")
+    st.subheader("Persönliche Watchlist, Chartanalyse & Scalable Derivate-Assistent")
     st.caption(
-        "Hier werden deine Fokus-Aktien in Echtzeit durchleuchtet – inklusive konkreter Parameter für **Knock-Outs, Optionsscheine und Faktor-Zertifikate**."
+        "Hier werden deine Fokus-Aktien in Echtzeit durchleuchtet – inklusive konkreter Eingabewerte für deine **Scalable Capital Knock-Out-Orders**."
     )
 
     col_cfg, col_sel = st.columns([2, 1])
@@ -380,7 +532,6 @@ with tab1:
         df_hist_selected = fetch_single_history(selected_ticker)
 
         if sel_data and analysis_mode.startswith("📊"):
-            # Auch im Swing-Modus die aktuellste 5m-Kerze abrufen, damit Derivate mit Echtzeitkurs rechnen
             df_intra_live, pivots_live = fetch_cached_intraday(selected_ticker, interval="5m", include_prepost=not selected_ticker.endswith(".DE"))
             intra_eval_live = IntradayAnalyzer.evaluate_intraday(df_intra_live, pivots_live, currency=sel_data['currency'])
             live_price_display = intra_eval_live['price'] if intra_eval_live else sel_data['price']
