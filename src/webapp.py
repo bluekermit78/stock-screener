@@ -16,6 +16,18 @@ DATA_PATH = os.path.join(BASE_DIR, "data", "latest_analysis.json")
 
 st.set_page_config(page_title="Aktien-Anlageberater & Screener", layout="wide", page_icon="📈")
 
+# Dezentes CSS für kompaktere Seitenränder, damit die Tabelle die volle Bildschirmbreite optimal nutzt
+st.markdown("""
+<style>
+    .block-container {
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+        padding-top: 2rem !important;
+        max-width: 100% !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 def load_config():
     with open(CONFIG_PATH, "r") as f:
         return yaml.safe_load(f)
@@ -23,6 +35,14 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
+
+def compact_verdict(v: str) -> str:
+    if not isinstance(v, str):
+        return ""
+    return (
+        v.replace("Starker Kauf", "Top-Kauf")
+         .replace("Verkauf / Meiden", "Meiden")
+    )
 
 @st.cache_data(ttl=900)
 def fetch_single_history(ticker: str, period: str = "2y") -> pd.DataFrame:
@@ -100,23 +120,23 @@ with st.expander("📖 Lexikon & Methodik: Was bedeuten die Abkürzungen, Indika
     with col_g2:
         st.markdown("""
         **⏱️ Die 3 Anlagehorizonte & Scores (0–100 Punkte)**
-        * **⚡ Kurzfristig (1–4 Wochen / Swing-Trade):** Fokus auf überverkaufte Situationen (RSI < 32), Kontakte am unteren Bollinger-Band und frische MACD-Kaufsignale. Ideal für taktische Einstiege.
-        * **🌊 Mittelfristig (1–6 Monate / Positions-Trade):** Bewertet die Trendstabilität über dem 50-Tage-Durchschnitt (SMA 50), dessen Steigung sowie das 3-Monats-Momentum.
-        * **🏛️ Langfristig (6+ Monate / Strategisch):** Prüft den großen Primärtrend (SMA 200) kombiniert mit Fundamentaldaten (KGV, Free-Cashflow-Rendite und Umsatzwachstum).
-        * **Gesamt-Urteil:** Gewichteter Gesamtwert (35 % Kurzfrist, 35 % Mittelfrist, 30 % Langfrist). Ab **60 Punkten = Kauf**, ab **75 Punkten = Starker Kauf**.
+        * **⚡ Kurz (1–4 Wochen / Swing-Trade):** Fokus auf überverkaufte Situationen (RSI < 32), Kontakte am unteren Bollinger-Band und frische MACD-Kaufsignale. Ideal für taktische Einstiege.
+        * **🌊 Mittel (1–6 Monate / Positions-Trade):** Bewertet die Trendstabilität über dem 50-Tage-Durchschnitt (SMA 50), dessen Steigung sowie das 3-Monats-Momentum.
+        * **🏛️ Lang (6+ Monate / Strategisch):** Prüft den großen Primärtrend (SMA 200) kombiniert mit Fundamentaldaten (KGV, Free-Cashflow-Rendite und Umsatzwachstum).
+        * **Score & Urteil:** Gewichteter Gesamtwert (35 % Kurzfrist, 35 % Mittelfrist, 30 % Langfrist). Ab **60 Punkten = Kauf**, ab **75 Punkten = Top-Kauf**.
         """)
     with col_g3:
         st.markdown("""
         **🛡️ Risikomanagement & Fundamentaldaten**
         * **ATR (Average True Range, 14 Tage):** Durchschnittliche Tagesschwankung einer Aktie in € oder $. Dient als objektives Maß für die Volatilität.
-        * **Stop-Loss (2x ATR):** Empfohlene Absicherungsmarke unterhalb des aktuellen Kurses (zweifache Tagesschwankung), um Verluste bei Trendbrüchen zu begrenzen, ohne durch normales Tagesrauschen ausgestoppt zu werden.
-        * **Kursziel (3.5x ATR):** Technisches Gewinnziel für ein attraktives Chance-Risiko-Verhältnis (CRV > 1,75 : 1).
+        * **SL (Stop-Loss, 2x ATR):** Empfohlene Absicherungsmarke unterhalb des aktuellen Kurses (zweifache Tagesschwankung), um Verluste bei Trendbrüchen zu begrenzen.
+        * **TP (Take-Profit / Kursziel, 3.5x ATR):** Technisches Gewinnziel für ein attraktives Chance-Risiko-Verhältnis (CRV > 1,75 : 1).
         * **KGV (Kurs-Gewinn-Verhältnis / P/E):** Wie viele Jahre das Unternehmen seinen aktuellen Gewinn erzielen muss, um den Börsenwert zu verdienen (niedriger = günstiger).
         * **FCF-Yield (Free-Cashflow-Rendite):** Freier Mittelzufluss im Verhältnis zum Börsenwert. Werte über 4–5 % zeigen hohe reale Ertragskraft.
         """)
 
 config = load_config()
-current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'SAP.DE', 'SIE.DE'])]
+current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'CARR', 'SAP.DE', 'SIE.DE'])]
 
 tab1, tab2, tab3 = st.tabs([
     "🎯 Meine Fokus-Aktien (Multi-Horizont-Berater)",
@@ -166,36 +186,38 @@ with tab1:
                 "Name": r['name'],
                 "Sektor": r['sector'],
                 "Kurs": f"{r['price']} {r['currency']}",
-                "1W %": r['perf']['1W'],
-                "1M %": r['perf']['1M'],
-                "3M %": r['perf']['3M'],
-                "1Y %": r['perf']['1Y'],
-                "Kurzfristig (1-4W)": f"{r['short_term'][' verdict']} ({r['short_term']['score']})",
-                "Mittelfristig (1-6M)": f"{r['mid_term']['verdict']} ({r['mid_term']['score']})",
-                "Langfristig (6M+)": f"{r['long_term']['verdict']} ({r['long_term']['score']})",
-                "Gesamt-Urteil": f"{r['overall_verdict']} ({r['total_score']})",
-                "Stop-Loss": f"{r['stop_loss']} {r['currency']}",
-                "Kursziel": f"{r['take_profit']} {r['currency']}"
+                "1W": r['perf']['1W'],
+                "1M": r['perf']['1M'],
+                "3M": r['perf']['3M'],
+                "1Y": r['perf']['1Y'],
+                "Kurz (1-4W)": f"{compact_verdict(r['short_term'][' verdict'])} ({r['short_term']['score']})",
+                "Mittel (1-6M)": f"{compact_verdict(r['mid_term']['verdict'])} ({r['mid_term']['score']})",
+                "Lang (6M+)": f"{compact_verdict(r['long_term']['verdict'])} ({r['long_term']['score']})",
+                "Urteil": f"{compact_verdict(r['overall_verdict'])} ({r['total_score']})",
+                "SL": f"{r['stop_loss']} {r['currency']}",
+                "TP": f"{r['take_profit']} {r['currency']}"
             })
         st.dataframe(
             pd.DataFrame(summary_rows),
             column_config={
                 "Ticker": st.column_config.LinkColumn(
-                    "Ticker",
+                    "Ticker", width="small",
                     help="Klicken, um Detaildaten & News auf Yahoo Finance in einem neuen Tab zu öffnen",
                     display_text=r"https://finance\.yahoo\.com/quote/(.*)"
                 ),
-                "Name": st.column_config.TextColumn("Unternehmen", help="Offizieller Firmenname"),
-                "Sektor": st.column_config.TextColumn("Sektor", help="Wirtschaftszweig / Branche"),
-                "1W %": st.column_config.NumberColumn("1W %", help="Kursentwicklung der letzten 5 Handelstage in %", format="%.2f %%"),
-                "1M %": st.column_config.NumberColumn("1M %", help="Kursentwicklung der letzten 21 Handelstage (ca. 1 Monat) in %", format="%.2f %%"),
-                "3M %": st.column_config.NumberColumn("3M %", help="Kursentwicklung der letzten 63 Handelstage (Quartal) in %", format="%.2f %%"),
-                "1Y %": st.column_config.NumberColumn("1Y %", help="Kursentwicklung der letzten 252 Handelstage (1 Jahr) in %", format="%.2f %%"),
-                "Kurzfristig (1-4W)": st.column_config.TextColumn("Kurzfristig (1-4W)", help="Taktische Bewertung auf Basis von RSI, Bollinger-Bändern, EMA 20 und MACD"),
-                "Mittelfristig (1-6M)": st.column_config.TextColumn("Mittelfristig (1-6M)", help="Trendfolge-Bewertung auf Basis von SMA 50 und 3-Monats-Momentum"),
-                "Langfristig (6M+)": st.column_config.TextColumn("Langfristig (6M+)", help="Strategische Bewertung aus 200-Tage-Linie (SMA 200) und Fundamentaldaten (KGV, Free Cashflow)"),
-                "Stop-Loss": st.column_config.TextColumn("Stop-Loss", help="Volatilitätsbasierter Stoppkurs (2x ATR unter aktuellem Kurs)"),
-                "Kursziel": st.column_config.TextColumn("Kursziel", help="Technisches Gewinnziel auf Sicht der nächsten Bewegung (3.5x ATR über Kurs)")
+                "Name": st.column_config.TextColumn("Unternehmen", width="medium", help="Offizieller Firmenname"),
+                "Sektor": st.column_config.TextColumn("Sektor", width="medium", help="Wirtschaftszweig / Branche"),
+                "Kurs": st.column_config.TextColumn("Kurs", width="small", help="Aktueller Kurs"),
+                "1W": st.column_config.NumberColumn("1W", width="small", help="Kursentwicklung 1 Woche in %", format="%.1f%%"),
+                "1M": st.column_config.NumberColumn("1M", width="small", help="Kursentwicklung 1 Monat in %", format="%.1f%%"),
+                "3M": st.column_config.NumberColumn("3M", width="small", help="Kursentwicklung 3 Monate in %", format="%.1f%%"),
+                "1Y": st.column_config.NumberColumn("1Y", width="small", help="Kursentwicklung 1 Jahr in %", format="%.1f%%"),
+                "Kurz (1-4W)": st.column_config.TextColumn("Kurz (1-4W)", width="small", help="Taktische Bewertung: RSI, Bollinger-Bänder, EMA 20, MACD"),
+                "Mittel (1-6M)": st.column_config.TextColumn("Mittel (1-6M)", width="small", help="Trendfolge-Bewertung: SMA 50 & 3M-Momentum"),
+                "Lang (6M+)": st.column_config.TextColumn("Lang (6M+)", width="small", help="Strategische Bewertung: SMA 200 & Fundamentaldaten"),
+                "Urteil": st.column_config.TextColumn("Gesamt", width="small", help="Gewichtetes Gesamturteil"),
+                "SL": st.column_config.TextColumn("SL", width="small", help="Stop-Loss (2x ATR unter Kurs)"),
+                "TP": st.column_config.TextColumn("TP", width="small", help="Technisches Kursziel (3.5x ATR über Kurs)")
             },
             use_container_width=True,
             hide_index=True
@@ -283,8 +305,8 @@ with tab2:
 with tab3:
     st.subheader("Gesamtmarkt-Screening (aus dem letzten Batch-Lauf)")
     st.caption(
-        "Hier findest du alle knapp 600 Aktien aus S&P 500, DAX 40 und MDAX inklusive Firmenname und Sektor. "
-        "**Tipp:** Setze oder entferne einfach den Haken in der ersten Spalte **'⭐ Fokus'**, um eine Aktie sofort in deine persönliche Watchlist (Tab 1) aufzunehmen oder daraus zu entfernen."
+        "Kompakte Vollbild-Ansicht aller knapp 600 Aktien aus S&P 500, DAX 40 und MDAX. "
+        "**Tipp:** Über die erste Spalte **'⭐'** nimmst du jede Aktie per Klick direkt in deine Fokus-Liste (Tab 1) auf."
     )
     if os.path.exists(DATA_PATH):
         with open(DATA_PATH, "r") as f:
@@ -292,22 +314,23 @@ with tab3:
         st.caption(f"Letztes automatisches Update: {batch_data.get('timestamp', 'Unbekannt')} | Analysierte Aktien: {len(batch_data.get('results', []))}")
         df_batch = pd.DataFrame(batch_data.get('results', []))
         if not df_batch.empty:
-            # Rückwärtskompatibilität, falls name/sector im alten JSON noch fehlen
             if 'name' not in df_batch.columns:
                 df_batch['name'] = df_batch['ticker']
             if 'sector' not in df_batch.columns:
                 df_batch['sector'] = 'Unbekannt'
 
-            col_f1, col_f2 = st.columns([1, 1])
+            col_f1, col_f2, col_f3 = st.columns([1.2, 1.2, 1.6])
             with col_f1:
-                min_score = st.slider(
-                    "Mindest-Gesamtscore filtern (ab 60 = Kaufempfehlung, ab 75 = Starker Kauf):",
-                    0, 100, 60
-                )
+                search_query = st.text_input("🔎 Suche nach Ticker oder Name (z. B. CARR):", value="")
             with col_f2:
+                min_score = st.slider(
+                    "Mindest-Score (0 = alle Aktien, ab 60 = Kauf):",
+                    0, 100, 0
+                )
+            with col_f3:
                 all_sectors = sorted(df_batch['sector'].dropna().unique().tolist())
                 selected_sectors = st.multiselect(
-                    "Nach Sektor / Branche filtern (leer = alle Sektoren):",
+                    "Sektor-Filter (leer = alle):",
                     options=all_sectors,
                     default=[]
                 )
@@ -315,8 +338,21 @@ with tab3:
             filtered_df = df_batch[df_batch['total_score'] >= min_score].copy()
             if selected_sectors:
                 filtered_df = filtered_df[filtered_df['sector'].isin(selected_sectors)]
+            if search_query.strip():
+                q = search_query.strip().lower()
+                filtered_df = filtered_df[
+                    filtered_df['ticker'].astype(str).str.lower().str.contains(q) |
+                    filtered_df['name'].astype(str).str.lower().str.contains(q)
+                ]
+
             filtered_df = filtered_df.sort_values(by="total_score", ascending=False)
             
+            # Kompakte Texte für optimale Bildschirmbreite
+            for col in ['short_term', 'mid_term', 'long_term', 'overall_verdict']:
+                filtered_df[col] = filtered_df[col].apply(compact_verdict)
+            filtered_df['name'] = filtered_df['name'].astype(str).str.slice(0, 22)
+            filtered_df['sector'] = filtered_df['sector'].astype(str).str.slice(0, 18)
+
             raw_tickers = filtered_df['ticker'].astype(str).str.upper()
             filtered_df.insert(0, 'in_focus', raw_tickers.isin(current_focus_list))
             filtered_df['raw_ticker'] = raw_tickers
@@ -332,35 +368,36 @@ with tab3:
                 ],
                 column_config={
                     "in_focus": st.column_config.CheckboxColumn(
-                        "⭐ Fokus",
-                        help="Anhaken, um diese Aktie direkt in 'Meine Fokus-Aktien' (Tab 1) zu übernehmen oder abzuwählen.",
+                        "⭐", width="small",
+                        help="Anhaken, um diese Aktie in 'Meine Fokus-Aktien' (Tab 1) zu übernehmen oder abzuwählen.",
                         default=False
                     ),
                     "raw_ticker": None,
                     "ticker": st.column_config.LinkColumn(
-                        "Ticker",
-                        help="Klicken, um das Wertpapier auf Yahoo Finance in einem neuen Fenster zu öffnen.",
+                        "Ticker", width="small",
+                        help="Klicken, um das Wertpapier auf Yahoo Finance in einem neuen Tab zu öffnen.",
                         display_text=r"https://finance\.yahoo\.com/quote/(.*)"
                     ),
-                    "name": st.column_config.TextColumn("Unternehmen", help="Vollständiger Name des Unternehmens"),
-                    "sector": st.column_config.TextColumn("Sektor / Branche", help="Wirtschaftszweig nach GICS / Börsensegment"),
-                    "price": st.column_config.NumberColumn("Kurs", help="Letzter Schlusskurs", format="%.2f"),
-                    "1W %": st.column_config.NumberColumn("1W %", help="Performance 1 Woche", format="%.2f %%"),
-                    "1M %": st.column_config.NumberColumn("1M %", help="Performance 1 Monat", format="%.2f %%"),
-                    "3M %": st.column_config.NumberColumn("3M %", help="Performance 3 Monate", format="%.2f %%"),
-                    "1Y %": st.column_config.NumberColumn("1Y %", help="Performance 1 Jahr", format="%.2f %%"),
-                    "rsi": st.column_config.NumberColumn("RSI (14)", help="Relative Strength Index (<30 überverkauft, >70 überkauft)", format="%.1f"),
-                    "short_term": st.column_config.TextColumn("Kurzfristig (1-4W)", help="Einschätzung für 1 bis 4 Wochen"),
-                    "mid_term": st.column_config.TextColumn("Mittelfristig (1-6M)", help="Einschätzung für 1 bis 6 Monate"),
-                    "long_term": st.column_config.TextColumn("Langfristig (6M+)", help="Einschätzung für 6+ Monate"),
-                    "total_score": st.column_config.NumberColumn("Gesamt-Score", help="Gewichteter Score von 0 bis 100", format="%.1f"),
-                    "overall_verdict": st.column_config.TextColumn("Gesamt-Urteil", help="Zusammenfassende Handlungsempfehlung"),
-                    "stop_loss": st.column_config.NumberColumn("Stop-Loss", help="Empfohlener Stop-Loss (2x ATR)", format="%.2f"),
-                    "take_profit": st.column_config.NumberColumn("Kursziel", help="Technisches Kursziel (3.5x ATR)", format="%.2f")
+                    "name": st.column_config.TextColumn("Name", width="small", help="Unternehmensname"),
+                    "sector": st.column_config.TextColumn("Sektor", width="small", help="Wirtschaftszweig nach GICS"),
+                    "price": st.column_config.NumberColumn("Kurs", width="small", help="Letzter Schlusskurs", format="%.2f"),
+                    "1W %": st.column_config.NumberColumn("1W", width="small", help="Performance 1 Woche in %", format="%.1f%%"),
+                    "1M %": st.column_config.NumberColumn("1M", width="small", help="Performance 1 Monat in %", format="%.1f%%"),
+                    "3M %": st.column_config.NumberColumn("3M", width="small", help="Performance 3 Monate in %", format="%.1f%%"),
+                    "1Y %": st.column_config.NumberColumn("1Y", width="small", help="Performance 1 Jahr in %", format="%.1f%%"),
+                    "rsi": st.column_config.NumberColumn("RSI", width="small", help="Relative Strength Index (14 Tage)", format="%.0f"),
+                    "short_term": st.column_config.TextColumn("Kurz", width="small", help="Kurzfristige Einschätzung (1–4 Wochen)"),
+                    "mid_term": st.column_config.TextColumn("Mittel", width="small", help="Mittelfristige Einschätzung (1–6 Monate)"),
+                    "long_term": st.column_config.TextColumn("Lang", width="small", help="Langfristige Einschätzung (6+ Monate)"),
+                    "total_score": st.column_config.NumberColumn("Score", width="small", help="Gewichteter Gesamt-Score (0–100)", format="%.1f"),
+                    "overall_verdict": st.column_config.TextColumn("Urteil", width="small", help="Zusammenfassende Handlungsempfehlung"),
+                    "stop_loss": st.column_config.NumberColumn("SL", width="small", help="Stop-Loss (2x ATR unter Kurs)", format="%.2f"),
+                    "take_profit": st.column_config.NumberColumn("TP", width="small", help="Kursziel (3.5x ATR über Kurs)", format="%.2f")
                 },
                 disabled=[c for c in filtered_df.columns if c != 'in_focus'],
                 use_container_width=True,
                 hide_index=True,
+                height=650,
                 key="market_editor"
             )
 

@@ -1,23 +1,13 @@
 markets:
-  - sp500
-  - dax
-  - mdax
-  - custom
-
+- sp500
+- dax
+- mdax
+- custom
 universe:
-  - AAPL
-  - MSFT
-  - GOOGL
-  - AMZN
-  - NVDA
-
-parameters:
-  rsi_period: 14
-  rsi_oversold: 30
-  sma_short: 50
-  sma_long: 200
-  top_signals_limit: 3
-
+- MSFT
+- GOOGL
+- AMZN
+- NVDA
 parameters:
   rsi_period: 14
   rsi_oversold: 30
@@ -27,8 +17,6 @@ parameters:
   max_forward_pe: 35.0
   min_fcf_yield_pct: 2.0
   require_positive_fcf: true
-
 notifications:
-  service: "ntfy"
-  endpoint: "https://ntfy.sh/ihr-geheimes-thema"
-
+  service: ntfy
+  endpoint: https://ntfy.sh/ihr-geheimes-thema

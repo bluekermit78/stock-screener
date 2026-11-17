@@ -23,7 +23,7 @@ def main():
 
     tickers, metadata = UniverseProvider.get_universe_with_metadata(config)
     fetcher = DataFetcher(tickers)
-    raw_data = fetcher.fetch_eod_data()
+    raw_data = fetcher.fetch_eod_data(period="2y")
 
     screener = MarketScreener(config['parameters'])
     tech_signals = []
@@ -33,12 +33,14 @@ def main():
         try:
             if ticker not in raw_data or raw_data[ticker].empty:
                 continue
-            df = raw_data[ticker].dropna()
+            # Nur Tage ohne Schlusskurs entfernen (verhindert Datenverlust bei US/EU-Feiertagen)
+            df = raw_data[ticker].dropna(subset=['Close', 'High', 'Low']).copy()
+            if len(df) < 200:
+                continue
+
             df = TechnicalIndicators.apply_indicators(df, config['parameters'])
-            
             meta = metadata.get(ticker, {"name": ticker, "sector": "Unbekannt"})
 
-            # 1. Multi-Horizont-Analyse inkl. Name & Sektor für das Web-UI speichern
             adv = InvestmentAdvisor.analyze_ticker(ticker, df)
             if adv:
                 full_market_overview.append({
@@ -60,7 +62,6 @@ def main():
                     "take_profit": adv['take_profit']
                 })
 
-            # 2. Klassisches Signal-Screening für Push-Nachricht
             signal = screener.evaluate(ticker, df)
             if signal:
                 signal['name'] = meta.get("name", ticker)
