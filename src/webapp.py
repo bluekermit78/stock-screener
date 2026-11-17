@@ -153,6 +153,7 @@ with tab1:
         res = InvestmentAdvisor.analyze_ticker(t, df_t, fund_t)
         if res:
             res['name'] = fund_t['name']
+            res['sector'] = fund_t['sector']
             res['pe'] = round(fund_t['pe'], 1) if fund_t['pe'] else None
             res['fcf_yield'] = round(fund_t['fcf_yield'], 1) if fund_t['fcf_yield'] else None
             watchlist_results.append(res)
@@ -163,6 +164,7 @@ with tab1:
             summary_rows.append({
                 "Ticker": f"https://finance.yahoo.com/quote/{r['ticker']}",
                 "Name": r['name'],
+                "Sektor": r['sector'],
                 "Kurs": f"{r['price']} {r['currency']}",
                 "1W %": r['perf']['1W'],
                 "1M %": r['perf']['1M'],
@@ -183,6 +185,8 @@ with tab1:
                     help="Klicken, um Detaildaten & News auf Yahoo Finance in einem neuen Tab zu öffnen",
                     display_text=r"https://finance\.yahoo\.com/quote/(.*)"
                 ),
+                "Name": st.column_config.TextColumn("Unternehmen", help="Offizieller Firmenname"),
+                "Sektor": st.column_config.TextColumn("Sektor", help="Wirtschaftszweig / Branche"),
                 "1W %": st.column_config.NumberColumn("1W %", help="Kursentwicklung der letzten 5 Handelstage in %", format="%.2f %%"),
                 "1M %": st.column_config.NumberColumn("1M %", help="Kursentwicklung der letzten 21 Handelstage (ca. 1 Monat) in %", format="%.2f %%"),
                 "3M %": st.column_config.NumberColumn("3M %", help="Kursentwicklung der letzten 63 Handelstage (Quartal) in %", format="%.2f %%"),
@@ -279,7 +283,7 @@ with tab2:
 with tab3:
     st.subheader("Gesamtmarkt-Screening (aus dem letzten Batch-Lauf)")
     st.caption(
-        "Hier findest du alle knapp 600 Aktien aus S&P 500, DAX 40 und MDAX. "
+        "Hier findest du alle knapp 600 Aktien aus S&P 500, DAX 40 und MDAX inklusive Firmenname und Sektor. "
         "**Tipp:** Setze oder entferne einfach den Haken in der ersten Spalte **'⭐ Fokus'**, um eine Aktie sofort in deine persönliche Watchlist (Tab 1) aufzunehmen oder daraus zu entfernen."
     )
     if os.path.exists(DATA_PATH):
@@ -288,13 +292,31 @@ with tab3:
         st.caption(f"Letztes automatisches Update: {batch_data.get('timestamp', 'Unbekannt')} | Analysierte Aktien: {len(batch_data.get('results', []))}")
         df_batch = pd.DataFrame(batch_data.get('results', []))
         if not df_batch.empty:
-            min_score = st.slider(
-                "Mindest-Gesamtscore filtern (ab 60 = Kaufempfehlung, ab 75 = Starker Kauf):",
-                0, 100, 60
-            )
-            filtered_df = df_batch[df_batch['total_score'] >= min_score].sort_values(by="total_score", ascending=False).copy()
+            # Rückwärtskompatibilität, falls name/sector im alten JSON noch fehlen
+            if 'name' not in df_batch.columns:
+                df_batch['name'] = df_batch['ticker']
+            if 'sector' not in df_batch.columns:
+                df_batch['sector'] = 'Unbekannt'
+
+            col_f1, col_f2 = st.columns([1, 1])
+            with col_f1:
+                min_score = st.slider(
+                    "Mindest-Gesamtscore filtern (ab 60 = Kaufempfehlung, ab 75 = Starker Kauf):",
+                    0, 100, 60
+                )
+            with col_f2:
+                all_sectors = sorted(df_batch['sector'].dropna().unique().tolist())
+                selected_sectors = st.multiselect(
+                    "Nach Sektor / Branche filtern (leer = alle Sektoren):",
+                    options=all_sectors,
+                    default=[]
+                )
+
+            filtered_df = df_batch[df_batch['total_score'] >= min_score].copy()
+            if selected_sectors:
+                filtered_df = filtered_df[filtered_df['sector'].isin(selected_sectors)]
+            filtered_df = filtered_df.sort_values(by="total_score", ascending=False)
             
-            # Rohen Ticker merken und Fokus-Status prüfen
             raw_tickers = filtered_df['ticker'].astype(str).str.upper()
             filtered_df.insert(0, 'in_focus', raw_tickers.isin(current_focus_list))
             filtered_df['raw_ticker'] = raw_tickers
@@ -302,18 +324,26 @@ with tab3:
 
             edited_df = st.data_editor(
                 filtered_df,
+                column_order=[
+                    "in_focus", "ticker", "name", "sector", "price",
+                    "1W %", "1M %", "3M %", "1Y %", "rsi",
+                    "short_term", "mid_term", "long_term",
+                    "total_score", "overall_verdict", "stop_loss", "take_profit"
+                ],
                 column_config={
                     "in_focus": st.column_config.CheckboxColumn(
                         "⭐ Fokus",
                         help="Anhaken, um diese Aktie direkt in 'Meine Fokus-Aktien' (Tab 1) zu übernehmen oder abzuwählen.",
                         default=False
                     ),
-                    "raw_ticker": None,  # Interne Hilfsspalte ausblenden
+                    "raw_ticker": None,
                     "ticker": st.column_config.LinkColumn(
-                        "Ticker (Yahoo Finance)",
+                        "Ticker",
                         help="Klicken, um das Wertpapier auf Yahoo Finance in einem neuen Fenster zu öffnen.",
                         display_text=r"https://finance\.yahoo\.com/quote/(.*)"
                     ),
+                    "name": st.column_config.TextColumn("Unternehmen", help="Vollständiger Name des Unternehmens"),
+                    "sector": st.column_config.TextColumn("Sektor / Branche", help="Wirtschaftszweig nach GICS / Börsensegment"),
                     "price": st.column_config.NumberColumn("Kurs", help="Letzter Schlusskurs", format="%.2f"),
                     "1W %": st.column_config.NumberColumn("1W %", help="Performance 1 Woche", format="%.2f %%"),
                     "1M %": st.column_config.NumberColumn("1M %", help="Performance 1 Monat", format="%.2f %%"),
@@ -334,7 +364,6 @@ with tab3:
                 key="market_editor"
             )
 
-            # Prüfen, ob der Nutzer einen Haken bei '⭐ Fokus' gesetzt oder entfernt hat
             currently_checked = set(edited_df[edited_df['in_focus']]['raw_ticker'])
             previously_checked_in_view = set(filtered_df[filtered_df['in_focus']]['raw_ticker'])
 

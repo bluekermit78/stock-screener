@@ -21,7 +21,7 @@ def main():
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 
-    tickers = UniverseProvider.get_tickers(config)
+    tickers, metadata = UniverseProvider.get_universe_with_metadata(config)
     fetcher = DataFetcher(tickers)
     raw_data = fetcher.fetch_eod_data()
 
@@ -36,11 +36,15 @@ def main():
             df = raw_data[ticker].dropna()
             df = TechnicalIndicators.apply_indicators(df, config['parameters'])
             
-            # 1. Multi-Horizont-Analyse für das Web-UI speichern
+            meta = metadata.get(ticker, {"name": ticker, "sector": "Unbekannt"})
+
+            # 1. Multi-Horizont-Analyse inkl. Name & Sektor für das Web-UI speichern
             adv = InvestmentAdvisor.analyze_ticker(ticker, df)
             if adv:
                 full_market_overview.append({
                     "ticker": adv['ticker'],
+                    "name": meta.get("name", ticker),
+                    "sector": meta.get("sector", "Unbekannt"),
                     "price": adv['price'],
                     "1W %": adv['perf']['1W'],
                     "1M %": adv['perf']['1M'],
@@ -59,11 +63,11 @@ def main():
             # 2. Klassisches Signal-Screening für Push-Nachricht
             signal = screener.evaluate(ticker, df)
             if signal:
+                signal['name'] = meta.get("name", ticker)
                 tech_signals.append(signal)
         except Exception as e:
             logging.error(f"Fehler bei Verarbeitung von {ticker}: {e}")
 
-    # Ergebnisse für die Web-UI als JSON sichern
     os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
     with open(DATA_PATH, "w") as f:
         json.dump({
