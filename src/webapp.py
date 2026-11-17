@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 from indicators import TechnicalIndicators
 from advisor import InvestmentAdvisor
 from intraday import IntradayAnalyzer
+from derivatives import DerivativesAdvisor
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -122,7 +123,6 @@ def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
     recent_dates = unique_dates[-2:] if len(unique_dates) >= 2 else unique_dates
     df_plot = df_intra[df_intra['Date'].isin(recent_dates)].copy()
 
-    # Kategorieller Zeit-String (deutsche Zeit) verhindert stundenlange leere Nacht-Lücken im Chart
     x_labels = df_plot.index.strftime("%d.%m. %H:%M")
 
     piv = eval_res['pivots']
@@ -161,51 +161,139 @@ def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
     fig.update_layout(height=740, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
-st.title("🏛️ Persönlicher Aktien-Anlageberater & Screener")
+def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: dict = None, is_intraday_view: bool = False):
+    deriv = DerivativesAdvisor.analyze_derivatives(df_hist, sel_data, intra_eval)
+    if not deriv:
+        return
+
+    cur = sel_data['currency']
+    price = sel_data['price']
+
+    st.divider()
+    st.markdown(f"#### 🎯 Derivate- & Hebel-Berater für **{sel_data['name']} ({sel_data['ticker']})**")
+    st.caption(
+        f"**Optimale Instrumenten-Wahl aktuell:** **{deriv['best_instrument']}** — *{deriv['best_reason']}* "
+        f"(Historische Volatilität 20T: {deriv['hv_20']}% | Vola-Ratio HV20/HV100: {deriv['vola_ratio']} | Tages-ATR: {deriv['atr_pct']}%)"
+    )
+
+    d_col1, d_col2, d_col3 = st.columns(3)
+
+    # Spalte 1: Knock-Out-Zertifikate (Intraday oder Swing je nach gewählter Ansicht)
+    with d_col1:
+        if is_intraday_view and deriv['intraday_ko']:
+            iko = deriv['intraday_ko']
+            st.info(
+                f"**⚡ 1. Intraday Knock-Out (Turbo)**\n\n"
+                f"- **Ausrichtung:** `{iko['direction']}`\n"
+                f"- **Max. empfohlener Hebel:** **`{iko['leverage']}x`**\n"
+                f"- **Max. KO-Schwelle (Basispreis):** `{iko['ko_barrier']:.2f} {cur}` *(Abstand: {iko['dist_pct']}%)*\n"
+                f"- **Mentaler Stop-Loss (Basiswert):** `{iko['mental_sl']:.2f} {cur}` *(vor KO verkaufen!)*\n"
+                f"- **Intraday-Kursziel (Basiswert):** `{iko['target']:.2f} {cur}`"
+            )
+        else:
+            sko = deriv['swing_ko']
+            st.info(
+                f"**🔥 1. Swing Knock-Out (Open-End Turbo)**\n\n"
+                f"- **Ausrichtung:** `{deriv['direction']}`\n"
+                f"- **Empfohlener Hebel:** **`{sko['leverage']}x`**\n"
+                f"- **Sichere KO-Barriere (3.2x ATR):** `{sko['ko_barrier']:.2f} {cur}` *(Abstand: {sko['dist_pct']}%)*\n"
+                f"- **Mentaler Stop-Loss (2.0x ATR):** `{sko['mental_sl']:.2f} {cur}` *(schützt vor Totalverlust)*\n"
+                f"- **Swing-Kursziel (3.5x ATR):** `{sko['target']:.2f} {cur}`"
+            )
+
+    # Spalte 2: Klassische Optionsscheine (Warrants)
+    with d_col2:
+        w = deriv['warrant']
+        st.warning(
+            f"**📜 2. Klassischer Optionsschein (Warrant)**\n\n"
+            f"- **Typ:** `{w['type']}`\n"
+            f"- **Volatilitäts-Check (Vega):** {w['status']}\n"
+            f"- **Empfohlener Basispreis (Strike):** ca. `{w['strike']:.1f} {cur}`\n"
+            f"- **Optimales Delta:** `{w['delta']}`\n"
+            f"- **Laufzeit-Regel:** {w['min_expiry']}"
+        )
+
+    # Spalte 3: Faktor-Zertifikate
+    with d_col3:
+        f = deriv['faktor']
+        st.success(
+            f"**🔄 3. Faktor-Zertifikat (Konstanter Hebel)**\n\n"
+            f"- **Eignung:** {f['status']}\n"
+            f"- **Empfohlener Faktor:** **`{f['recommended_faktor']}`**\n"
+            f"- **Wichtige Handelsregel:** {f['note']}"
+        )
+
+    # Interaktiver Positionsgrößen- & Derivate-Stop-Rechner
+    with st.expander("🧮 Interaktiver Positionsgrößen- & Knock-Out-Risiko-Rechner (für deinen Broker)", expanded=False):
+        rc1, rc2, rc3 = st.columns(3)
+        active_ko = deriv['intraday_ko'] if (is_intraday_view and deriv['intraday_ko']) else deriv['swing_ko']
+        with rc1:
+            max_risk_eur = st.number_input("Maximaler Verlust pro Trade (in €):", min_value=20, max_value=10000, value=150, step=25, key=f"risk_{sel_data['ticker']}_{is_intraday_view}")
+        with rc2:
+            chosen_lev = st.number_input("Gewählter Hebel des Knock-Outs:", min_value=1.5, max_value=30.0, value=float(active_ko['leverage']), step=0.5, key=f"lev_{sel_data['ticker']}_{is_intraday_view}")
+        with rc3:
+            cert_price = st.number_input("Aktueller Briefkurs des Zertifikats (in €):", min_value=0.10, max_value=100.0, value=2.50, step=0.10, key=f"cprice_{sel_data['ticker']}_{is_intraday_view}")
+
+        sl_move_pct = abs(price - active_ko['mental_sl']) / price
+        tp_move_pct = abs(active_ko['target'] - price) / price
+        cert_loss_pct = min(0.99, sl_move_pct * chosen_lev)
+        cert_gain_pct = tp_move_pct * chosen_lev
+
+        max_position_eur = round(max_risk_eur / cert_loss_pct, 2) if cert_loss_pct > 0 else 0.0
+        shares_count = int(max_position_eur // cert_price) if cert_price > 0 else 0
+        cert_sl_price = round(cert_price * (1.0 - cert_loss_pct), 2)
+        cert_tp_price = round(cert_price * (1.0 + cert_gain_pct), 2)
+        expected_profit_eur = round(shares_count * (cert_tp_price - cert_price), 2)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Max. Positionsgröße", f"{max_position_eur:.0f} €", f"{shares_count} Anteile à {cert_price:.2f} €", delta_color="off")
+        m2.metric("Stop-Loss im Zertifikat", f"{cert_sl_price:.2f} €", f"-{cert_loss_pct*100:.1f}% (bei Basiswert {active_ko['mental_sl']} {cur})", delta_color="inverse")
+        m3.metric("Kursziel im Zertifikat", f"{cert_tp_price:.2f} €", f"+{cert_gain_pct*100:.1f}% (bei Basiswert {active_ko['target']} {cur})")
+        m4.metric("Erwarteter Gewinn / Risiko", f"+{expected_profit_eur:.0f} €", f"Risiko: -{max_risk_eur:.0f} €", delta_color="off")
+
+st.title("🏛️ Persönlicher Aktien- & Derivate-Anlageberater")
 st.markdown(
-    "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)** und **fundamentale Unternehmensbewertung**, "
-    "um dir über alle Zeithorizonte hinweg objektive Kauf- und Halteempfehlungen sowie konkrete Risikoleitplanken zu liefern."
+    "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)**, **fundamentale Bewertung** "
+    "und ein mathematisches **Derivate-Playbook (Knock-Outs, Optionsscheine, Faktor-Zertifikate)**."
 )
 
-with st.expander("📖 Lexikon & Methodik: Was bedeuten die Abkürzungen, Indikatoren und Intraday-Marken?"):
+with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Derivate-Regeln"):
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         st.markdown("""
         **📈 Swing- & Trend-Indikatoren (Tageschart)**
         * **RSI (Relative Strength Index, 14):** Misst die Dynamik auf einer Skala von 0 bis 100 (**<30** überverkauft, **>70** überkauft).
         * **EMA 20 / SMA 50 / SMA 200:** Gleitende Durchschnittskurse der letzten 20, 50 bzw. 200 Handelstage.
-        * **MACD:** Zeigt Trendstärke und Momentum-Wechsel an.
-        * **Bollinger-Bänder (BB):** Statistische Schwankungsbreite (2 Standardabweichungen) um den 20-Tage-Schnitt.
+        * **MACD & Bollinger-Bänder:** Zeigen Trendwechsel und statistische Übertreibungen an.
         """)
     with col_g2:
         st.markdown("""
         **⚡ Intraday-Trading-Indikatoren (5-Minuten-Chart)**
-        * **VWAP (Volume Weighted Average Price):** Volumengewichteter Durchschnittspreis des heutigen Tages. Institutionelle Benchmark: Kurse **über VWAP** = Bullisch (Long-Bias), **unter VWAP** = Bärisch.
-        * **ORB (Opening Range Breakout):** Hoch- und Tiefpunkt der ersten 30 Handelsminuten. Ein Ausbruch über das *ORB High* bei hohem Volumen liefert ein starkes Intraday-Trendsignal.
-        * **Pivot-Punkte ($P, R_1, R_2, S_1, S_2$):** Aus Vortages-Hoch, -Tief und -Schluss berechnete Unterstützungs- ($S_1, S_2$) und Widerstandszonen ($R_1, R_2$) für Tages-Trades.
-        * **Handelszeiten (MEZ):** Xetra (`.DE`) läuft von **09:00–17:30 Uhr**, der reguläre US-Handel (NYSE/NASDAQ) von **15:30–22:00 Uhr** (US Pre-Market ab 10:00 Uhr).
+        * **VWAP (Volume Weighted Average Price):** Volumengewichteter Durchschnittspreis des heutigen Tages. Kurse **über VWAP** = Bullisch (Long-Bias), **unter VWAP** = Bärisch.
+        * **ORB (Opening Range Breakout):** Hoch- und Tiefpunkt der ersten 30 Handelsminuten.
+        * **Pivot-Punkte ($P, R_1, R_2, S_1, S_2$):** Aus dem Vortag berechnete Unterstützungs- und Widerstandszonen.
         """)
     with col_g3:
         st.markdown("""
-        **🛡️ Risikomanagement & Fundamentaldaten**
-        * **ATR (Average True Range):** Durchschnittliche Tagesschwankung in € oder $.
-        * **SL (Stop-Loss, 2x ATR) & TP (Kursziel, 3.5x ATR):** Volatilitätsbasierte Leitplanken für Swing-Trades.
-        * **KGV (P/E) & FCF-Yield:** Kurs-Gewinn-Verhältnis und Free-Cashflow-Rendite für die langfristige Bewertung.
+        **🎯 Derivate-Regeln (KO, Optionsschein, Faktor)**
+        * **Knock-Out (Turbo):** Kein Volatilitäts-Risiko. Die KO-Schwelle muss immer weiter entfernt liegen als dein mentaler Stop-Loss (3.2x ATR vs. 2.0x ATR), um Overnight-Totalverluste zu verhindern.
+        * **Optionsschein (Warrant):** Nur bei niedriger Volatilität (`HV20/HV100 < 1.1`) kaufen. Delta **0.55–0.65** und **>4 Monate Laufzeit** schützen vor Zeitwertverfall (*Theta*).
+        * **Faktor-Zertifikat:** Wegen der täglichen Hebel-Anpassung (*Pfadabhängigkeit*) nur in starken, schwankungsarmen Trends nutzen!
         """)
 
 config = load_config()
 current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'CARR', 'SAP.DE', 'SIE.DE'])]
 
 tab1, tab2, tab3 = st.tabs([
-    "🎯 Meine Fokus-Aktien (Multi-Horizont & Intraday)",
+    "🎯 Meine Fokus-Aktien (Multi-Horizont, Intraday & Derivate)",
     "🌍 Indizes & Markt-Kompass",
     "🔍 Gesamtmarkt-Screener (S&P 500 / DAX / MDAX)"
 ])
 
 with tab1:
-    st.subheader("Persönliche Watchlist & Detail-Chartanalyse")
+    st.subheader("Persönliche Watchlist, Chartanalyse & Derivate-Playbook")
     st.caption(
-        "Hier werden deine Fokus-Aktien in Echtzeit durchleuchtet. Unten kannst du für jede Aktie zwischen der **Mehrjahres-/Swing-Analyse** und dem **⚡ Live Intraday-Cockpit (5-Minuten-Kerzen)** umschalten."
+        "Hier werden deine Fokus-Aktien in Echtzeit durchleuchtet – inklusive konkreter Parameter für **Knock-Outs, Optionsscheine und Faktor-Zertifikate**."
     )
 
     col_cfg, col_sel = st.columns([2, 1])
@@ -283,15 +371,16 @@ with tab1:
         st.divider()
         col_pick, col_mode = st.columns([1, 1.5])
         with col_pick:
-            selected_ticker = st.selectbox("🔎 Aktie für Detail-Analyse auswählen:", watchlist)
+            selected_ticker = st.selectbox("🔎 Aktie für Detail- & Derivate-Analyse auswählen:", watchlist)
         with col_mode:
             analysis_mode = st.radio(
                 "Analyse-Modus wählen:",
-                ["📊 Multi-Horizont-Analyse (Tageschart)", "⚡ Live Intraday-Cockpit (5-Minuten-Chart)"],
+                ["📊 Multi-Horizont & Swing-Derivate (Tageschart)", "⚡ Live Intraday-Cockpit & Daytrading-Turbos (5m-Chart)"],
                 horizontal=True
             )
 
         sel_data = next((item for item in watchlist_results if item['ticker'] == selected_ticker), None)
+        df_hist_selected = fetch_single_history(selected_ticker)
 
         if sel_data and analysis_mode.startswith("📊"):
             c1, c2, c3, c4 = st.columns(4)
@@ -311,7 +400,8 @@ with tab1:
                 st.success(f"**🏛️ Langfristig (6+ Monate): {sel_data['long_term']['verdict']} ({sel_data['long_term']['score']}/100)**\n\n" +
                            ("\n".join([f"- {x}" for x in sel_data['long_term']['reasons']]) or "- Neutrale Bewertung"))
 
-            plot_chart(fetch_single_history(selected_ticker), selected_ticker)
+            render_derivatives_panel(df_hist_selected, sel_data, intra_eval=None, is_intraday_view=False)
+            plot_chart(df_hist_selected, selected_ticker)
 
         elif sel_data and analysis_mode.startswith("⚡"):
             col_hdr, col_pre, col_btn = st.columns([2.5, 1.5, 1])
@@ -370,6 +460,7 @@ with tab1:
                     f"\n\n**📌 Intraday-Fahrplan:** Solange der Kurs über dem **VWAP ({intra_eval['vwap']:.2f} {cur})** bzw. über **Pivot P ({pivots['P']:.2f} {cur})** handelt, liegen die nächsten Tagesziele bei **R1 ({pivots['R1']:.2f} {cur})** und **R2 ({pivots['R2']:.2f} {cur})**. Ein Rückfall unter das **ORB-Tief ({intra_eval['orb_low']:.2f} {cur})** aktiviert die Unterstützung bei **S1 ({pivots['S1']:.2f} {cur})**."
                 )
 
+                render_derivatives_panel(df_hist_selected, sel_data, intra_eval=intra_eval, is_intraday_view=True)
                 plot_intraday_chart(df_intra, intra_eval, selected_ticker)
             else:
                 st.warning("Für diesen Ticker konnten aktuell keine 5-Minuten-Intraday-Daten geladen werden.")
@@ -378,7 +469,7 @@ with tab2:
     st.subheader("Globale Leitindizes im Performance- & Trend-Check")
     st.caption(
         "Der Markt-Kompass zeigt dir die Großwetterlage an den Börsen. "
-        "Käufe in Einzelaktien haben eine deutlich höhere Trefferquote, wenn auch der übergeordnete Heimatindex im Aufwärtstrend notiert."
+        "Käufe in Einzelaktien und Long-Derivaten haben eine deutlich höhere Trefferquote, wenn auch der übergeordnete Heimatindex im Aufwärtstrend notiert."
     )
     indices = {
         "^GSPC": "S&P 500 (USA Leitindex)",
