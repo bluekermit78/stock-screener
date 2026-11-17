@@ -18,6 +18,8 @@ class UniverseProvider:
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) StockScreener/1.0"
     }
+    # Bekannte delistete oder fehlerhafte Wikipedia-Ticker (z. B. Encavis nach Übernahme)
+    IGNORED_TICKERS = {"ECV.DE", "MOR.DE", "VTSC.DE"}
 
     @classmethod
     def _fetch_tables(cls, url: str) -> list:
@@ -41,6 +43,8 @@ class UniverseProvider:
         meta = {}
         for _, row in df.iterrows():
             sym = str(row['Symbol']).strip().replace('.', '-')
+            if sym in cls.IGNORED_TICKERS:
+                continue
             name = str(row.get('Security', sym)).strip()
             sector = str(row.get('GICS Sector', 'Unbekannt')).strip()
             meta[sym] = {"name": name, "sector": sector}
@@ -65,6 +69,8 @@ class UniverseProvider:
                     if pd.isna(raw_t):
                         continue
                     t = cls._clean_de_ticker(raw_t)
+                    if t in cls.IGNORED_TICKERS:
+                        continue
                     name = str(row[name_col]).strip() if (name_col and pd.notna(row[name_col])) else t
                     sector = str(row[sector_col]).strip() if (sector_col and pd.notna(row[sector_col])) else index_key.upper()
                     meta[t] = {"name": name, "sector": sector}
@@ -79,7 +85,9 @@ class UniverseProvider:
         if isinstance(markets, str):
             markets = [markets]
 
-        # Lokalen Metadaten-Cache laden
+        custom_excludes = {str(x).strip().upper() for x in config.get('exclude', [])}
+        all_ignored = cls.IGNORED_TICKERS | custom_excludes
+
         cached_meta = {}
         if os.path.exists(META_CACHE_PATH):
             try:
@@ -100,6 +108,8 @@ class UniverseProvider:
                 elif market == 'custom':
                     for t in config.get('universe', []):
                         t = str(t).strip().upper()
+                        if t in all_ignored:
+                            continue
                         if t not in combined_meta:
                             if t in cached_meta and cached_meta[t].get("name") != t:
                                 combined_meta[t] = cached_meta[t]
@@ -115,12 +125,16 @@ class UniverseProvider:
             except Exception as e:
                 logging.error(f"Fehler beim Laden von '{market}': {e}")
 
+        # Ausgeschlossene Ticker bereinigen
+        for ignored in all_ignored:
+            combined_meta.pop(ignored, None)
+
         if not combined_meta:
             for t in config.get('universe', []):
                 t = str(t).strip().upper()
-                combined_meta[t] = cached_meta.get(t, {"name": t, "sector": "Custom"})
+                if t not in all_ignored:
+                    combined_meta[t] = cached_meta.get(t, {"name": t, "sector": "Custom"})
 
-        # Metadaten-Cache aktualisieren und speichern
         cached_meta.update(combined_meta)
         os.makedirs(os.path.dirname(META_CACHE_PATH), exist_ok=True)
         with open(META_CACHE_PATH, "w") as f:
