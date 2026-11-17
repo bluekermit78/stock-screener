@@ -1,6 +1,7 @@
 import os
 import yaml
 import logging
+from universe import UniverseProvider
 from fetcher import DataFetcher
 from indicators import TechnicalIndicators
 from screener import MarketScreener
@@ -15,7 +16,7 @@ def main():
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 
-    tickers = config['universe']
+    tickers = UniverseProvider.get_tickers(config)
     fetcher = DataFetcher(tickers)
     raw_data = fetcher.fetch_eod_data()
 
@@ -24,6 +25,8 @@ def main():
 
     for ticker in tickers:
         try:
+            if ticker not in raw_data or raw_data[ticker].empty:
+                continue
             df = raw_data[ticker].dropna()
             df = TechnicalIndicators.apply_indicators(df, config['parameters'])
             signal = screener.evaluate(ticker, df)

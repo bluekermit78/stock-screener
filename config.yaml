@@ -1,10 +1,11 @@
+universe_mode: "sp500"  # "sp500" für alle S&P 500 Werte oder "custom" für eigene Liste
+
 universe:
   - AAPL
   - MSFT
   - GOOGL
   - AMZN
   - NVDA
-  # ... weitere Ticker oder eine größere Liste
 
 parameters:
   rsi_period: 14
@@ -14,5 +15,5 @@ parameters:
   top_signals_limit: 3
 
 notifications:
-  service: "ntfy"  # oder "telegram"
-  endpoint: "https://ntfy.sh/ihr-geheimes-thema" # oder Telegram Bot Token/ChatID
+  service: "ntfy"
+  endpoint: "https://ntfy.sh/ihr-geheimes-thema"
