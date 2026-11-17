@@ -2,6 +2,9 @@ import yfinance as yf
 import pandas as pd
 import logging
 
+# Verhindert SQLite-Locks bei automatisierten Skripten/Cronjobs
+yf.enable_download_cache(False)
+
 class DataFetcher:
     def __init__(self, tickers: list):
         self.tickers = tickers
