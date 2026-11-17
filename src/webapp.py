@@ -56,7 +56,6 @@ def plot_chart(df: pd.DataFrame, ticker: str):
         subplot_titles=(f"{ticker} Kursverlauf & Indikatoren (letzte 180 Handelstage)", "RSI (14)", "MACD (12, 26, 9)")
     )
 
-    # Candlesticks & Durchschnitte
     fig.add_trace(go.Candlestick(
         x=df_plot.index, open=df_plot['Open'], high=df_plot['High'],
         low=df_plot['Low'], close=df_plot['Close'], name="Kurs"
@@ -67,12 +66,10 @@ def plot_chart(df: pd.DataFrame, ticker: str):
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['BB_Upper'], line=dict(color='gray', dash='dot', width=1), name='BB Upper'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['BB_Lower'], line=dict(color='gray', dash='dot', width=1), name='BB Lower'), row=1, col=1)
 
-    # RSI
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['RSI'], line=dict(color='#9b5de5', width=1.5), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-    # MACD
     fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], name='MACD Hist', marker_color='#adb5bd'), row=3, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='#0077b6', width=1.5), name='MACD'), row=3, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='#fb8500', width=1.5), name='Signal'), row=3, col=1)
@@ -103,7 +100,6 @@ with tab1:
 
     watchlist = [t.strip().upper() for t in new_watchlist_str.split(",") if t.strip()]
     
-    # Übersichtstabelle für alle Fokus-Aktien berechnen
     watchlist_results = []
     for t in watchlist:
         df_t = fetch_single_history(t)
@@ -119,7 +115,7 @@ with tab1:
         summary_rows = []
         for r in watchlist_results:
             summary_rows.append({
-                "Ticker": r['ticker'],
+                "Ticker": f"https://finance.yahoo.com/quote/{r['ticker']}",
                 "Name": r['name'],
                 "Kurs": f"{r['price']} {r['currency']}",
                 "1W %": r['perf']['1W'],
@@ -133,7 +129,18 @@ with tab1:
                 "Stop-Loss": f"{r['stop_loss']} {r['currency']}",
                 "Kursziel": f"{r['take_profit']} {r['currency']}"
             })
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(summary_rows),
+            column_config={
+                "Ticker": st.column_config.LinkColumn(
+                    "Ticker",
+                    help="Öffnet die Aktie auf Yahoo Finance in einem neuen Tab",
+                    display_text=r"https://finance\.yahoo\.com/quote/(.*)"
+                )
+            },
+            use_container_width=True,
+            hide_index=True
+        )
 
         st.divider()
         selected_ticker = st.selectbox("🔎 Aktie für tiefe Chart- & Horizont-Analyse auswählen:", watchlist)
@@ -198,7 +205,22 @@ with tab3:
         df_batch = pd.DataFrame(batch_data.get('results', []))
         if not df_batch.empty:
             min_score = st.slider("Mindest-Gesamtscore filtern:", 0, 100, 60)
-            filtered_df = df_batch[df_batch['total_score'] >= min_score].sort_values(by="total_score", ascending=False)
-            st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+            filtered_df = df_batch[df_batch['total_score'] >= min_score].sort_values(by="total_score", ascending=False).copy()
+            
+            # Ticker in klickbare Yahoo-Finance-URL umwandeln
+            filtered_df['ticker'] = "https://finance.yahoo.com/quote/" + filtered_df['ticker'].astype(str)
+
+            st.dataframe(
+                filtered_df,
+                column_config={
+                    "ticker": st.column_config.LinkColumn(
+                        "Ticker",
+                        help="Öffnet detaillierte Finanzdaten & News auf Yahoo Finance in einem neuen Tab",
+                        display_text=r"https://finance\.yahoo\.com/quote/(.*)"
+                    )
+                },
+                use_container_width=True,
+                hide_index=True
+            )
     else:
         st.info("Noch keine Batch-Daten vorhanden. Führe einmal `python3 src/main.py` aus, um den Gesamtmarkt-Cache zu füllen.")
