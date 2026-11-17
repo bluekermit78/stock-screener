@@ -241,8 +241,8 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
         st.markdown(
             f"**Schritt 1 – Zertifikate-Filter in Scalable Capital öffnen (`Derivate` ➔ `{sel_data['name']}`):**\n"
             f"1. **Richtung wählen:** `{'Long' if default_is_long else 'Short'}` | **Hebel-Filter einstellen:** ca. `{max(2.0, round(active_ko['leverage']-2, 0)):.0f}x bis {round(active_ko['leverage']+2, 0):.0f}x`\n"
-            f"2. **Nach Knock-Out-Schwelle in {cur} schauen:** Bei **Long** muss die KO-Schwelle **unter `{active_ko['ko_barrier']:.2f} {cur}`** liegen (bei Short über `{active_ko['ko_barrier']:.2f} {cur}`).\n"
-            f"3. Wähle ein Zertifikat (z. B. von BNP, HSBC, Vontobel oder UniCredit) aus der Liste und trage seine **KO-Schwelle** sowie den **Briefkurs (Kaufpreis in €)** hier unten ein:"
+            f"2. **Nach Knock-Out-Schwelle in {cur} schauen:** Bei **Long** sollte die KO-Schwelle **unter `{active_ko['ko_barrier']:.2f} {cur}`** liegen (bei Short über `{active_ko['ko_barrier']:.2f} {cur}`).\n"
+            f"3. Wähle dein Wunsch-Zertifikat in Scalable aus und trage unten die **KO-Schwelle** sowie den **Briefkurs (Kaufpreis in €)** ein:"
         )
 
         st.divider()
@@ -261,43 +261,56 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             user_ko_barrier = st.number_input(
                 f"KO-Schwelle des Zertifikats (in {cur}):",
                 min_value=1.0, max_value=100000.0, value=float(default_ko), step=0.5,
-                help=f"Steht im Namen des Zertifikats, z. B. 'NVIDIA Long 130,06 Turbo' -> 130.06 {cur}",
+                help=f"Steht im Namen des Zertifikats, z. B. 'Long 377,28 Turbo' -> 377.28 {cur}",
                 key=f"{key_prefix}_ko"
             )
+
+        # Sinnvolles Standard-Bezugsverhältnis je nach Aktienpreis vorwählen (über 250 $/€ meist 0,01; sonst 0,10)
+        smart_default_ratio = 0.01 if price >= 250 else 0.10
+        est_intrinsic = max(0.10, (abs(price - user_ko_barrier) * smart_default_ratio) / eur_usd)
+
         with sc3:
-            ratio = st.selectbox(
-                "Bezugsverhältnis (Standard 0,10):",
-                [0.10, 0.01, 1.00],
-                index=0,
-                help="Bei fast allen US- und DAX-Aktien (wie Nvidia, Apple, SAP) ist das Bezugsverhältnis 0,10 (10 Zertifikate beziehen sich auf 1 Aktie).",
-                key=f"{key_prefix}_ratio"
-            )
-            # Rechnerischer innerer Wert als sinnvoller Startwert für den Briefkurs
-            intrinsic_eur = max(0.15, (abs(price - user_ko_barrier) * ratio) / eur_usd)
-        with sc4:
             cert_ask_eur = st.number_input(
                 "Aktueller Briefkurs / Kaufpreis (in €):",
-                min_value=0.05, max_value=500.0, value=round(intrinsic_eur + 0.04, 2), step=0.05,
-                help="Der aktuelle Preis in Euro für 1 Anteil bei Scalable Capital.",
+                min_value=0.05, max_value=500.0, value=round(est_intrinsic + 0.03, 2), step=0.01,
+                help="Der aktuelle Kaufpreis in Euro für 1 Anteil bei Scalable Capital.",
                 key=f"{key_prefix}_ask"
             )
+        with sc4:
+            ratio_choice = st.selectbox(
+                "Bezugsverhältnis (Automatisch):",
+                ["Automatisch (aus Briefkurs & KO)", "0.01 (1:100, z. B. MSFT/META)", "0.10 (1:10, z. B. NVDA/AAPL)", "1.00 (1:1)"],
+                index=0,
+                help="Erkennt anhand deines eingegebenen Briefkurses automatisch, ob das Zertifikat das Bezugsverhältnis 0,01, 0,10 oder 1,0 hat.",
+                key=f"{key_prefix}_ratio_auto"
+            )
 
-        # Berechnung von Effektiv-Hebel, Innerem Wert und Aufgeld
-        stock_price_eur = price / eur_usd
-        eff_leverage = round((stock_price_eur * ratio) / cert_ask_eur, 2) if cert_ask_eur > 0 else 1.0
-        raw_intrinsic_eur = ((price - user_ko_barrier) * ratio / eur_usd) if is_long else ((user_ko_barrier - price) * ratio / eur_usd)
-        raw_intrinsic_eur = max(0.0, raw_intrinsic_eur)
-        premium_eur = round(cert_ask_eur - raw_intrinsic_eur, 2)
-        ko_dist_pct = ((price - user_ko_barrier) / price * 100) if is_long else ((user_ko_barrier - price) / price * 100)
+        ko_dist_abs = (price - user_ko_barrier) if is_long else (user_ko_barrier - price)
+        ko_dist_pct = (ko_dist_abs / price) * 100
 
         if ko_dist_pct <= 0:
-            st.error(f"⚠️ Achtung: Die eingegebene KO-Schwelle ({user_ko_barrier:.2f} {cur}) wurde beim aktuellen Kurs ({price:.2f} {cur}) bereits erreicht oder verletzt!")
+            st.error(f"⚠️ Achtung: Die eingegebene KO-Schwelle ({user_ko_barrier:.2f} {cur}) liegt auf der falschen Seite des aktuellen Kurses ({price:.2f} {cur}) oder wurde bereits erreicht!")
             return
 
+        # Automatische Bestimmung des korrekten Bezugsverhältnisses aus dem Briefkurs
+        unscaled_intrinsic_eur = ko_dist_abs / eur_usd
+        if ratio_choice.startswith("Automatisch"):
+            candidate_ratios = [0.001, 0.01, 0.1, 1.0, 10.0]
+            # Wähle das Bezugsverhältnis, bei dem der innere Wert am besten zum Briefkurs passt (Briefkurs = Innerer Wert + kleines Aufgeld)
+            ratio = min(candidate_ratios, key=lambda r: abs((unscaled_intrinsic_eur * r) - (cert_ask_eur * 0.92)))
+        else:
+            ratio = float(ratio_choice.split()[0])
+
+        stock_price_eur = price / eur_usd
+        eff_leverage = round((stock_price_eur * ratio) / cert_ask_eur, 2) if cert_ask_eur > 0 else 1.0
+        raw_intrinsic_eur = max(0.0, unscaled_intrinsic_eur * ratio)
+        premium_eur = round(cert_ask_eur - raw_intrinsic_eur, 2)
+
         st.caption(
-            f"🔍 **Zertifikate-Check:** Realer Hebel: **`{eff_leverage:.2f}x`** | "
-            f"Abstand zum Knock-Out: **`{ko_dist_pct:.2f}%`** (`{abs(price - user_ko_barrier):.2f} {cur}`) | "
-            f"Rechnerischer innerer Wert: **`{raw_intrinsic_eur:.2f} €`** (Aufgeld/Finanzierung: `{premium_eur:+.2f} €` pro Schein)"
+            f"🔍 **Zertifikate-Check:** Erkanntes Bezugsverhältnis: **`{ratio}`** | "
+            f"Realer Effektiv-Hebel: **`{eff_leverage:.2f}x`** | "
+            f"Abstand zum Knock-Out: **`{ko_dist_pct:.2f}%`** (`{ko_dist_abs:.2f} {cur}`) | "
+            f"Innerer Wert: **`{raw_intrinsic_eur:.2f} €`** (Aufgeld: `{premium_eur:+.2f} €` pro Schein)"
         )
 
         st.divider()
@@ -317,7 +330,6 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             else:
                 user_budget_val = st.number_input("Gewünschte Stückzahl (Anteile):", min_value=1, max_value=50000, value=100, step=10, key=f"{key_prefix}_sval")
 
-        # Sinnvolle Vorbelegung für Stop-Loss und Kursziel der Aktie
         atr_val = float(sel_data['atr'])
         default_sl_stock = float(active_ko['mental_sl']) if (is_long == default_is_long) else round(price - 1.5 * atr_val if is_long else price + 1.5 * atr_val, 2)
         default_tp_stock = float(active_ko['target']) if (is_long == default_is_long) else round(price + 2.5 * atr_val if is_long else price - 2.5 * atr_val, 2)
@@ -326,7 +338,7 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             sl_stock = st.number_input(
                 f"Dein Stop-Loss im Aktienchart ({cur}):",
                 value=float(default_sl_stock), step=0.25,
-                help="Kurs der Aktie, bei dem du die Reißleine ziehst (muss vor der KO-Schwelle liegen!).",
+                help="Kurs der Aktie, bei dem du die Reißleine ziehst (muss zwischen aktuellem Kurs und KO-Schwelle liegen!).",
                 key=f"{key_prefix}_slstock"
             )
         with p_col4:
@@ -337,12 +349,18 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
                 key=f"{key_prefix}_etype"
             )
 
-        # Umrechnung des Aktien-Stop-Loss und Aktien-Kursziels in den Euro-Preis des Zertifikats
-        # Preisänderung des Zertifikats in € = (Kursänderung Aktie in USD * Bezugsverhältnis) / EURUSD
+        # Sicherheitsprüfung: Liegt der gewählte Stop-Loss überhaupt vor der Knock-Out-Schwelle?
+        if (is_long and sl_stock <= user_ko_barrier) or (not is_long and sl_stock >= user_ko_barrier):
+            st.warning(
+                f"⚠️ Dein gewählter Stop-Loss im Aktienchart ({sl_stock:.2f} {cur}) liegt jenseits der Knock-Out-Schwelle ({user_ko_barrier:.2f} {cur})! "
+                f"Das Zertifikat wäre vorher bereits ausgeknockt (Totalverlust). Bitte setze den Stop-Loss näher an den aktuellen Kurs ({price:.2f} {cur})."
+            )
+
+        # Exakte Umrechnung über das erkannte Bezugsverhältnis + Erhalt des Aufgelds
         stock_diff_to_sl = abs(price - sl_stock)
         cert_loss_per_share_eur = (stock_diff_to_sl * ratio) / eur_usd
         cert_sl_eur = max(0.01, round(cert_ask_eur - cert_loss_per_share_eur, 2))
-        actual_loss_per_share = max(0.01, cert_ask_eur - cert_sl_eur)
+        actual_loss_per_share = max(0.01, round(cert_ask_eur - cert_sl_eur, 2))
         cert_loss_pct = (actual_loss_per_share / cert_ask_eur) * 100
 
         stock_diff_to_tp = abs(default_tp_stock - price)
@@ -350,7 +368,6 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
         cert_tp_eur = round(cert_ask_eur + cert_gain_per_share_eur, 2)
         cert_gain_pct = (cert_gain_per_share_eur / cert_ask_eur) * 100
 
-        # Stückzahl und Investitionsbetrag je nach Modus berechnen
         if sizing_mode.startswith("1."):
             shares = max(1, int(user_budget_val // actual_loss_per_share))
         elif sizing_mode.startswith("2."):
@@ -360,21 +377,18 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
 
         total_invest_eur = round(shares * cert_ask_eur, 2)
         total_risk_eur = round(shares * actual_loss_per_share, 2)
-        total_profit_eur = round(shares * cert_gain_per_share_eur, 2)
+        total_profit_eur = round(shares * (cert_tp_eur - cert_ask_eur), 2)
 
-        # Berechnung für STOP hinzufügen & LIMIT hinzufügen beim Kauf
         if entry_type.startswith("Sofortkauf"):
             buy_stop_str = "Nicht aktivieren (leer lassen)"
-            # Enges Kauflimit (+1,0 % bzw. mind. +0,02 € über Briefkurs statt der teuren 4 % Scalable-Automatik)
-            buy_limit_eur = round(max(cert_ask_eur + 0.02, cert_ask_eur * 1.01), 2)
-            buy_mode_hint = f"Schützt dich vor Slippage (max. +1% über Briefkurs statt der 4% Standard-Toleranz)."
+            buy_limit_eur = round(max(cert_ask_eur + 0.01, cert_ask_eur * 1.01), 2)
+            buy_mode_hint = "Schützt dich vor Slippage (max. +1% über Briefkurs statt der 4% Standard-Toleranz)."
         else:
-            # Breakout-Kauf: z. B. Ausbruch über ORB High (oder +0,5 % im Basiswert)
             orb_trigger_stock = intra_eval['orb_high'] if (intra_eval and is_long and intra_eval['orb_high'] > price) else round(price * (1.005 if is_long else 0.995), 2)
             diff_to_trigger = abs(orb_trigger_stock - price)
             trigger_cert_eur = round(cert_ask_eur + ((diff_to_trigger * ratio) / eur_usd), 2)
             buy_stop_str = f"{trigger_cert_eur:.2f} €"
-            buy_limit_eur = round(trigger_cert_eur + max(0.03, trigger_cert_eur * 0.01), 2)
+            buy_limit_eur = round(trigger_cert_eur + max(0.02, trigger_cert_eur * 0.01), 2)
             buy_mode_hint = f"Aktiviert den Kauf erst, wenn die Aktie auf {orb_trigger_stock:.2f} {cur} ausbricht."
 
         st.divider()
@@ -390,12 +404,11 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
                 f"  *({buy_mode_hint})*"
             )
         with out2:
-            # Scalable verlangt bei Stop-Loss-Verkaufsorders einen Stop-Preis (Trigger) und ein leicht darunterliegendes Limit
-            sell_sl_limit_eur = max(0.01, round(cert_sl_eur - max(0.02, cert_sl_eur * 0.015), 2))
+            sell_sl_limit_eur = max(0.01, round(cert_sl_eur - max(0.01, cert_sl_eur * 0.015), 2))
             st.warning(
                 f"**🛡️ B. Eingabe direkt NACH dem Kauf (Verkaufs-Absicherung / Stop-Loss):**\n\n"
                 f"- **Stop-Loss STOP-Preis (Auslöser bei Aktie {sl_stock:.2f} {cur}):** **`{cert_sl_eur:.2f} €`** *(-{cert_loss_pct:.1f}%)*\n"
-                f"- **Stop-Loss LIMIT-Preis (Mindestverkaufspreis):** **`{sell_sl_limit_eur:.2f} €`** *(1,5% Puffer für sichere Ausführung)*\n"
+                f"- **Stop-Loss LIMIT-Preis (Mindestverkaufspreis):** **`{sell_sl_limit_eur:.2f} €`** *(Puffer für sichere Ausführung)*\n"
                 f"- **Optionales Gewinnziel (Limit-Verkauf bei Aktie {default_tp_stock:.2f} {cur}):** **`{cert_tp_eur:.2f} €`** *(+{cert_gain_pct:.1f}%)*\n"
                 f"- **Dein exaktes Euro-Ergebnis:** Risiko bis Stop-Loss: **`-{total_risk_eur:.2f} €`** | Gewinn am Ziel: **`+{total_profit_eur:.2f} €`**"
             )
