@@ -7,12 +7,17 @@ class Notifier:
 
     def send_push(self, top_signals: list):
         if not top_signals:
-            logging.info("Keine Signale heute.")
+            logging.info("Keine Signale nach technischer & fundamentaler Prüfung.")
             return
 
-        message = "🚨 **Top 3 Aktiensignale (EOD)**\n\n"
+        message = "🚨 **Top 3 Aktiensignale (Technik + Fundamental)**\n\n"
         for idx, sig in enumerate(top_signals, 1):
-            message += f"{idx}. **{sig['ticker']}** | Preis: ${sig['price']}\n   ↳ {sig['reasons']} (Score: {sig['score']})\n\n"
+            fund_info = sig.get('fundamentals', 'n/a')
+            message += (
+                f"{idx}. **{sig['ticker']}** | ${sig['price']} (Score: {sig['score']})\n"
+                f"   📈 Technik: {sig['reasons']}\n"
+                f"   🏛️ Fundamental: {fund_info}\n\n"
+            )
 
         response = requests.post(
             self.endpoint,

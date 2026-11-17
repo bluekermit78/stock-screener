@@ -14,6 +14,17 @@ parameters:
   sma_long: 200
   top_signals_limit: 3
 
+parameters:
+  rsi_period: 14
+  rsi_oversold: 30
+  sma_short: 50
+  sma_long: 200
+  top_signals_limit: 3
+  max_forward_pe: 35.0
+  min_fcf_yield_pct: 2.0
+  require_positive_fcf: true
+
 notifications:
   service: "ntfy"
   endpoint: "https://ntfy.sh/ihr-geheimes-thema"
+
