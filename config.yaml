@@ -1,0 +1,18 @@
+universe:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  # ... weitere Ticker oder eine größere Liste
+
+parameters:
+  rsi_period: 14
+  rsi_oversold: 30
+  sma_short: 50
+  sma_long: 200
+  top_signals_limit: 3
+
+notifications:
+  service: "ntfy"  # oder "telegram"
+  endpoint: "https://ntfy.sh/ihr-geheimes-thema" # oder Telegram Bot Token/ChatID
