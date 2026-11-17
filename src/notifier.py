@@ -13,8 +13,9 @@ class Notifier:
         message = "🚨 **Top 3 Aktiensignale (Technik + Fundamental)**\n\n"
         for idx, sig in enumerate(top_signals, 1):
             fund_info = sig.get('fundamentals', 'n/a')
+            currency = "€" if sig['ticker'].endswith(".DE") else "$"
             message += (
-                f"{idx}. **{sig['ticker']}** | ${sig['price']} (Score: {sig['score']})\n"
+                f"{idx}. **{sig['ticker']}** | {sig['price']} {currency} (Score: {sig['score']})\n"
                 f"   📈 Technik: {sig['reasons']}\n"
                 f"   🏛️ Fundamental: {fund_info}\n\n"
             )

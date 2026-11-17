@@ -1,4 +1,8 @@
-universe_mode: "sp500"  # "sp500" für alle S&P 500 Werte oder "custom" für eigene Liste
+markets:
+  - sp500
+  - dax
+  - mdax
+  - custom
 
 universe:
   - AAPL
