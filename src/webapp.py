@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 
 from indicators import TechnicalIndicators
 from advisor import InvestmentAdvisor
+from intraday import IntradayAnalyzer
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -16,7 +17,6 @@ DATA_PATH = os.path.join(BASE_DIR, "data", "latest_analysis.json")
 
 st.set_page_config(page_title="Aktien-Anlageberater & Screener", layout="wide", page_icon="📈")
 
-# Dezentes CSS für kompaktere Seitenränder, damit die Tabelle die volle Bildschirmbreite optimal nutzt
 st.markdown("""
 <style>
     .block-container {
@@ -50,6 +50,10 @@ def fetch_single_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     if not df.empty:
         df = TechnicalIndicators.apply_indicators(df)
     return df
+
+@st.cache_data(ttl=60)
+def fetch_cached_intraday(ticker: str, interval: str = "5m"):
+    return IntradayAnalyzer.fetch_intraday_data(ticker, interval=interval, period="5d")
 
 @st.cache_data(ttl=3600)
 def fetch_fundamentals(ticker: str) -> dict:
@@ -101,45 +105,89 @@ def plot_chart(df: pd.DataFrame, ticker: str):
     fig.update_layout(height=740, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
+def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
+    # Letzte 2 Handelstage anzeigen für sauberen Blick auf den heutigen Tag + Vortagesschluss
+    unique_dates = df_intra['Date'].unique()
+    recent_dates = unique_dates[-2:] if len(unique_dates) >= 2 else unique_dates
+    df_plot = df_intra[df_intra['Date'].isin(recent_dates)].copy()
+
+    piv = eval_res['pivots']
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.6, 0.2, 0.2],
+        subplot_titles=(
+            f"{ticker} – Intraday (5m Kerzen) mit Tages-VWAP, EMA 9/21 & Pivot-Marken",
+            "Intraday-Volumen & Relatives Volumen",
+            "Intraday RSI (14)"
+        )
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=df_plot.index, open=df_plot['Open'], high=df_plot['High'],
+        low=df_plot['Low'], close=df_plot['Close'], name="5m Kurs"
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VWAP'], line=dict(color='#ffd166', width=2.5), name='VWAP (Institutionell)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_9'], line=dict(color='#00b4d8', width=1.3), name='EMA 9'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_21'], line=dict(color='#f77f00', width=1.3), name='EMA 21'), row=1, col=1)
+
+    # Horizontale Pivot- und ORB-Linien
+    fig.add_hline(y=piv['R1'], line_dash="dot", line_color="#ef476f", annotation_text=f"R1 ({piv['R1']})", row=1, col=1)
+    fig.add_hline(y=piv['P'], line_dash="dash", line_color="#adb5bd", annotation_text=f"Pivot ({piv['P']})", row=1, col=1)
+    fig.add_hline(y=piv['S1'], line_dash="dot", line_color="#06d6a0", annotation_text=f"S1 ({piv['S1']})", row=1, col=1)
+    fig.add_hline(y=eval_res['orb_high'], line_dash="dashdot", line_color="#118ab2", annotation_text=f"ORB High ({eval_res['orb_high']})", row=1, col=1)
+    fig.add_hline(y=eval_res['orb_low'], line_dash="dashdot", line_color="#118ab2", annotation_text=f"ORB Low ({eval_res['orb_low']})", row=1, col=1)
+
+    # Volumen
+    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name='Volumen', marker_color='#4cc9f0'), row=2, col=1)
+
+    # RSI
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['RSI'], line=dict(color='#9b5de5', width=1.5), name='Intraday RSI'), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+
+    # Wochenend- und Nacht-Lücken ausblenden
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    fig.update_layout(height=740, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
 st.title("🏛️ Persönlicher Aktien-Anlageberater & Screener")
 st.markdown(
-    "Dieses Dashboard kombiniert **technische Chartanalyse** und **fundamentale Unternehmensbewertung**, "
-    "um dir über drei Zeithorizonte hinweg objektive Kauf- und Halteempfehlungen sowie konkrete Risikoleitplanken zu liefern."
+    "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)** und **fundamentale Unternehmensbewertung**, "
+    "um dir über alle Zeithorizonte hinweg objektive Kauf- und Halteempfehlungen sowie konkrete Risikoleitplanken zu liefern."
 )
 
-with st.expander("📖 Lexikon & Methodik: Was bedeuten die Abkürzungen, Indikatoren und Zeithorizonte?"):
+with st.expander("📖 Lexikon & Methodik: Was bedeuten die Abkürzungen, Indikatoren und Intraday-Marken?"):
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         st.markdown("""
-        **📈 Technische Indikatoren**
-        * **RSI (Relative Strength Index, 14 Tage):** Misst die Geschwindigkeit von Kursbewegungen auf einer Skala von 0 bis 100. Werte **unter 30** gelten als *überverkauft* (Rebound-Chance), Werte **über 70** als *überkauft* (Rückschlagsgefahr).
-        * **EMA 20 / SMA 50 / SMA 200:** Gleitende Durchschnittskurse der letzten 20, 50 bzw. 200 Handelstage. Notiert der Kurs darüber, ist der jeweilige Trend intakt. Kreuzt der SMA 50 den SMA 200 von unten nach oben, spricht man vom bullischen **Golden Cross**.
-        * **MACD (Moving Average Convergence Divergence):** Zeigt Schwung- und Trendwechsel an. Steigt das Histogramm über die Nulllinie (MACD kreuzt Signallinie nach oben), entsteht ein Kaufsignal.
-        * **Bollinger-Bänder (BB):** Statistische Schwankungsbreite (2 Standardabweichungen) um den 20-Tage-Schnitt. Ein Kontakt mit dem unteren Band deutet oft auf eine kurzfristige Gegenbewegung nach oben hin.
+        **📈 Swing- & Trend-Indikatoren (Tageschart)**
+        * **RSI (Relative Strength Index, 14):** Misst die Dynamik auf einer Skala von 0 bis 100 (**<30** überverkauft, **>70** überkauft).
+        * **EMA 20 / SMA 50 / SMA 200:** Gleitende Durchschnittskurse der letzten 20, 50 bzw. 200 Handelstage.
+        * **MACD:** Zeigt Trendstärke und Momentum-Wechsel an.
+        * **Bollinger-Bänder (BB):** Statistische Schwankungsbreite (2 Standardabweichungen) um den 20-Tage-Schnitt.
         """)
     with col_g2:
         st.markdown("""
-        **⏱️ Die 3 Anlagehorizonte & Scores (0–100 Punkte)**
-        * **⚡ Kurz (1–4 Wochen / Swing-Trade):** Fokus auf überverkaufte Situationen (RSI < 32), Kontakte am unteren Bollinger-Band und frische MACD-Kaufsignale. Ideal für taktische Einstiege.
-        * **🌊 Mittel (1–6 Monate / Positions-Trade):** Bewertet die Trendstabilität über dem 50-Tage-Durchschnitt (SMA 50), dessen Steigung sowie das 3-Monats-Momentum.
-        * **🏛️ Lang (6+ Monate / Strategisch):** Prüft den großen Primärtrend (SMA 200) kombiniert mit Fundamentaldaten (KGV, Free-Cashflow-Rendite und Umsatzwachstum).
-        * **Score & Urteil:** Gewichteter Gesamtwert (35 % Kurzfrist, 35 % Mittelfrist, 30 % Langfrist). Ab **60 Punkten = Kauf**, ab **75 Punkten = Top-Kauf**.
+        **⚡ Intraday-Trading-Indikatoren (5-Minuten-Chart)**
+        * **VWAP (Volume Weighted Average Price):** Volumengewichteter Durchschnittspreis des heutigen Tages. Institutionelle Benchmark: Kurse **über VWAP** = Bullisch (Long-Bias), **unter VWAP** = Bärisch.
+        * **ORB (Opening Range Breakout):** Hoch- und Tiefpunkt der ersten 30 Handelsminuten. Ein Ausbruch über das *ORB High* bei hohem Volumen liefert ein starkes Intraday-Trendsignal.
+        * **Pivot-Punkte ($P, R_1, R_2, S_1, S_2$):** Aus Vortages-Hoch, -Tief und -Schluss berechnete Unterstützungs- ($S_1, S_2$) und Widerstandszonen ($R_1, R_2$) für Tages-Trades.
+        * **RVOL (Relatives Volumen):** Verhältnis des aktuellen Kerzenvolumens zum Durchschnitt der letzten 20 Kerzen (Werte **> 1.5x** zeigen hohes institutionelles Interesse).
         """)
     with col_g3:
         st.markdown("""
         **🛡️ Risikomanagement & Fundamentaldaten**
-        * **ATR (Average True Range, 14 Tage):** Durchschnittliche Tagesschwankung einer Aktie in € oder $. Dient als objektives Maß für die Volatilität.
-        * **SL (Stop-Loss, 2x ATR):** Empfohlene Absicherungsmarke unterhalb des aktuellen Kurses (zweifache Tagesschwankung), um Verluste bei Trendbrüchen zu begrenzen.
-        * **TP (Take-Profit / Kursziel, 3.5x ATR):** Technisches Gewinnziel für ein attraktives Chance-Risiko-Verhältnis (CRV > 1,75 : 1).
-        * **KGV (Kurs-Gewinn-Verhältnis / P/E):** Wie viele Jahre das Unternehmen seinen aktuellen Gewinn erzielen muss, um den Börsenwert zu verdienen (niedriger = günstiger).
-        * **FCF-Yield (Free-Cashflow-Rendite):** Freier Mittelzufluss im Verhältnis zum Börsenwert. Werte über 4–5 % zeigen hohe reale Ertragskraft.
+        * **ATR (Average True Range):** Durchschnittliche Tagesschwankung in € oder $.
+        * **SL (Stop-Loss, 2x ATR) & TP (Kursziel, 3.5x ATR):** Volatilitätsbasierte Leitplanken für Swing-Trades.
+        * **KGV (P/E) & FCF-Yield:** Kurs-Gewinn-Verhältnis und Free-Cashflow-Rendite für die langfristige Bewertung.
         """)
 
 config = load_config()
 current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'CARR', 'SAP.DE', 'SIE.DE'])]
 
 tab1, tab2, tab3 = st.tabs([
-    "🎯 Meine Fokus-Aktien (Multi-Horizont-Berater)",
+    "🎯 Meine Fokus-Aktien (Multi-Horizont & Intraday)",
     "🌍 Indizes & Markt-Kompass",
     "🔍 Gesamtmarkt-Screener (S&P 500 / DAX / MDAX)"
 ])
@@ -147,8 +195,7 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     st.subheader("Persönliche Watchlist & Detail-Chartanalyse")
     st.caption(
-        "Hier werden deine ausgewählten Fokus-Aktien in Echtzeit auf drei Zeitebenen durchleuchtet. "
-        "Du kannst Aktien unten manuell ergänzen oder direkt im Reiter 'Gesamtmarkt-Screener' per Klick auf den Stern (⭐) übernehmen."
+        "Hier werden deine Fokus-Aktien in Echtzeit durchleuchtet. Unten kannst du für jede Aktie zwischen der **Mehrjahres-/Swing-Analyse** und dem **⚡ Live Intraday-Cockpit (5-Minuten-Kerzen)** umschalten."
     )
 
     col_cfg, col_sel = st.columns([2, 1])
@@ -224,49 +271,89 @@ with tab1:
         )
 
         st.divider()
-        selected_ticker = st.selectbox("🔎 Aktie für tiefe Chart- & Horizont-Analyse auswählen:", watchlist)
+        col_pick, col_mode = st.columns([1, 1.5])
+        with col_pick:
+            selected_ticker = st.selectbox("🔎 Aktie für Detail-Analyse auswählen:", watchlist)
+        with col_mode:
+            analysis_mode = st.radio(
+                "Analyse-Modus wählen:",
+                ["📊 Multi-Horizont-Analyse (Tageschart)", "⚡ Live Intraday-Cockpit (5-Minuten-Chart)"],
+                horizontal=True
+            )
+
         sel_data = next((item for item in watchlist_results if item['ticker'] == selected_ticker), None)
 
-        if sel_data:
+        if sel_data and analysis_mode.startswith("📊"):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric(
-                "Aktueller Kurs",
-                f"{sel_data['price']} {sel_data['currency']}",
-                f"{sel_data['perf']['1M']}% (1M)",
-                help="Letzter Börsenkurs und prozentuale Veränderung auf Sicht von einem Monat."
-            )
-            c2.metric(
-                "Gesamt-Empfehlung",
-                sel_data['overall_verdict'],
-                f"Score: {sel_data['total_score']} / 100",
-                help="Gewichteter Score über alle drei Zeithorizonte (ab 60 = Kauf, ab 75 = Starker Kauf)."
-            )
-            c3.metric(
-                "Empfohlener Stop-Loss (2x ATR)",
-                f"{sel_data['stop_loss']} {sel_data['currency']}",
-                help=f"Absicherungsmarke auf Basis der aktuellen Tagesschwankung (ATR = {sel_data['atr']} {sel_data['currency']})."
-            )
-            c4.metric(
-                "Technisches Kursziel (3.5x ATR)",
-                f"{sel_data['take_profit']} {sel_data['currency']}",
-                help="Rechnerisches Kursziel für ein positives Chance-Risiko-Verhältnis von 1,75 : 1."
-            )
+            c1.metric("Aktueller Kurs", f"{sel_data['price']} {sel_data['currency']}", f"{sel_data['perf']['1M']}% (1M)")
+            c2.metric("Gesamt-Empfehlung", sel_data['overall_verdict'], f"Score: {sel_data['total_score']} / 100")
+            c3.metric("Empfohlener Stop-Loss (2x ATR)", f"{sel_data['stop_loss']} {sel_data['currency']}")
+            c4.metric("Technisches Kursziel (3.5x ATR)", f"{sel_data['take_profit']} {sel_data['currency']}")
 
             h1, h2, h3 = st.columns(3)
             with h1:
                 st.info(f"**⚡ Kurzfristig (1–4 Wochen): {sel_data['short_term'][' verdict']} ({sel_data['short_term']['score']}/100)**\n\n" +
-                        "*Fokus: Rebound-Chancen, RSI-Extrema & kurzfristiges Momentum*\n\n" +
-                        ("\n".join([f"- {x}" for x in sel_data['short_term']['reasons']]) or "- Neutrale Indikatorenlage ohne Extremwerte"))
+                        ("\n".join([f"- {x}" for x in sel_data['short_term']['reasons']]) or "- Neutrale Indikatorenlage"))
             with h2:
                 st.warning(f"**🌊 Mittelfristig (1–6 Monate): {sel_data['mid_term']['verdict']} ({sel_data['mid_term']['score']}/100)**\n\n" +
-                           "*Fokus: Stabilität des 50-Tage-Trends & Quartalsdynamik*\n\n" +
-                           ("\n".join([f"- {x}" for x in sel_data['mid_term']['reasons']]) or "- Seitwärtstrend ohne klaren Impuls"))
+                           ("\n".join([f"- {x}" for x in sel_data['mid_term']['reasons']]) or "- Seitwärtstrend"))
             with h3:
                 st.success(f"**🏛️ Langfristig (6+ Monate): {sel_data['long_term']['verdict']} ({sel_data['long_term']['score']}/100)**\n\n" +
-                           "*Fokus: Übergeordneter 200-Tage-Trend & fundamentale Ertragskraft*\n\n" +
                            ("\n".join([f"- {x}" for x in sel_data['long_term']['reasons']]) or "- Neutrale Bewertung"))
 
             plot_chart(fetch_single_history(selected_ticker), selected_ticker)
+
+        elif sel_data and analysis_mode.startswith("⚡"):
+            col_hdr, col_btn = st.columns([4, 1])
+            with col_hdr:
+                st.markdown(f"#### ⚡ Intraday-Trading-Desk: **{sel_data['name']} ({selected_ticker})**")
+            with col_btn:
+                if st.button("🔄 Kursdaten aktualisieren"):
+                    st.cache_data.clear()
+                    st.rerun()
+
+            df_intra, pivots = fetch_cached_intraday(selected_ticker, interval="5m")
+            intra_eval = IntradayAnalyzer.evaluate_intraday(df_intra, pivots, currency=sel_data['currency'])
+
+            if intra_eval:
+                cur = sel_data['currency']
+                vwap_diff_pct = round(((intra_eval['price'] / intra_eval['vwap']) - 1) * 100, 2) if intra_eval['vwap'] else 0.0
+
+                ic1, ic2, ic3, ic4 = st.columns(4)
+                ic1.metric(
+                    "Intraday-Signal (5m)",
+                    intra_eval['action'],
+                    f"Intraday-Score: {intra_eval['score']} / 100",
+                    help="Kombiniertes Signal aus VWAP-Position, 30m Opening Range Breakout, EMA 9/21 und 5m-RSI."
+                )
+                ic2.metric(
+                    "Kurs vs. Tages-VWAP",
+                    f"{intra_eval['price']} {cur}",
+                    f"{vwap_diff_pct:+.2f}% zum VWAP ({intra_eval['vwap']} {cur})",
+                    help="Notiert der Kurs über dem VWAP, haben institutionelle Käufer im heutigen Handelsverlauf das Übergewicht."
+                )
+                ic3.metric(
+                    "Opening Range (erste 30 Min)",
+                    f"{intra_eval['orb_low']} – {intra_eval['orb_high']} {cur}",
+                    f"RVOL: {intra_eval['rvol']}x | RSI(5m): {intra_eval['rsi']}",
+                    help="Spanne der ersten 30 Handelsminuten. Ausbrüche darüber (ORB High) oder darunter (ORB Low) liefern starke Richtungsimpulse."
+                )
+                ic4.metric(
+                    "Tages-Pivot & Schlüsselzonen",
+                    f"Pivot: {pivots['P']} {cur}",
+                    f"Support S1: {pivots['S1']} | Widerstand R1: {pivots['R1']}",
+                    help=f"Klassische Floor-Pivots aus dem Vortag (S2: {pivots['S2']} | S1: {pivots['S1']} | P: {pivots['P']} | R1: {pivots['R1']} | R2: {pivots['R2']})."
+                )
+
+                st.info(
+                    f"**🎯 Aktuelle Intraday-Einschätzung (Stand: {intra_eval['last_timestamp']}):**\n\n" +
+                    "\n".join([f"- {s}" for s in intra_eval['signals']]) +
+                    f"\n\n**📌 Intraday-Fahrplan:** Solange der Kurs über dem **VWAP ({intra_eval['vwap']} {cur})** bzw. über **Pivot P ({pivots['P']} {cur})** handelt, liegen die nächsten Tagesziele bei **R1 ({pivots['R1']} {cur})** und **R2 ({pivots['R2']} {cur})**. Ein Rückfall unter das **ORB-Tief ({intra_eval['orb_low']} {cur})** aktiviert die Unterstützung bei **S1 ({pivots['S1']} {cur})**."
+                )
+
+                plot_intraday_chart(df_intra, intra_eval, selected_ticker)
+            else:
+                st.warning("Für diesen Ticker konnten aktuell keine 5-Minuten-Intraday-Daten geladen werden.")
 
 with tab2:
     st.subheader("Globale Leitindizes im Performance- & Trend-Check")
@@ -347,7 +434,6 @@ with tab3:
 
             filtered_df = filtered_df.sort_values(by="total_score", ascending=False)
             
-            # Kompakte Texte für optimale Bildschirmbreite
             for col in ['short_term', 'mid_term', 'long_term', 'overall_verdict']:
                 filtered_df[col] = filtered_df[col].apply(compact_verdict)
             filtered_df['name'] = filtered_df['name'].astype(str).str.slice(0, 22)
