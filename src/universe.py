@@ -35,23 +35,43 @@ class UniverseProvider:
         
         tickers = []
         for df in tables:
-            # Suche nach der Tabelle mit der Spalte 'Ticker' oder 'Ticker symbol'
-            col_name = next((col for col in df.columns if 'ticker' in str(col).lower()), None)
-            if col_name and len(df) >= 30:
+            col_name = next((col for col in df.columns if any(k in str(col).lower() for k in ['ticker', 'symbol', 'isin'])), None)
+            if col_name is not None and len(df) >= 10:
                 raw_tickers = df[col_name].dropna().astype(str).tolist()
                 for t in raw_tickers:
-                    t = t.strip().split()[0]  # Bereinige eventuelle Fußnoten
-                    if not t.endswith(".DE"):
+                    t = t.strip().split()[0]
+                    if '.' in t:
+                        base = t.split('.')[0]
+                        t = f"{base}.DE"
+                    elif not t.endswith(".DE"):
                         t = f"{t}.DE"
                     tickers.append(t)
                 break
+
+        # Fallback, falls keine Spalte per Keyword gefunden wurde
+        if not tickers:
+            for df in tables:
+                if len(df) >= 10 and len(df.columns) > 1:
+                    for col in df.columns[:3]:
+                        sample = df[col].dropna().astype(str).tolist()
+                        if any(len(s) <= 6 for s in sample[:5]):
+                            for t in sample:
+                                t = t.strip().split()[0]
+                                if '.' in t:
+                                    base = t.split('.')[0]
+                                    t = f"{base}.DE"
+                                elif not t.endswith(".DE"):
+                                    t = f"{t}.DE"
+                                tickers.append(t)
+                            break
+                    if tickers:
+                        break
 
         logging.info(f"{len(tickers)} {index_key.upper()} Ticker geladen.")
         return tickers
 
     @classmethod
     def get_tickers(cls, config: dict) -> list:
-        # Unterstützt Liste unter 'markets' oder den bisherigen String 'universe_mode'
         markets = config.get('markets', [config.get('universe_mode', 'custom')])
         if isinstance(markets, str):
             markets = [markets]
@@ -70,12 +90,10 @@ class UniverseProvider:
             except Exception as e:
                 logging.error(f"Fehler beim Laden von '{market}': {e}")
 
-        # Fallback auf custom universe, falls alle Abrufe fehlschlagen
         if not combined_tickers:
             logging.warning("Keine Index-Ticker geladen, nutze Fallback-Liste aus config.yaml.")
             combined_tickers = config.get('universe', [])
 
-        # Duplikate entfernen unter Beibehaltung der Reihenfolge
         unique_tickers = list(dict.fromkeys(combined_tickers))
         logging.info(f"Gesamtes Screening-Universum: {len(unique_tickers)} Aktien.")
         return unique_tickers
