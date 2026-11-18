@@ -785,30 +785,79 @@ with tab_port:
         k4.metric("Kleinster KO-Abstand im Depot", f"{min_ko_puffer:.2f} %", "Unter 5% = erhöhte Vorsicht!", delta_color="off")
 
         st.divider()
-        st.markdown("#### 📋 Säule 1: Das zentrale Derivate-Logbuch (Live-Überwachung)")
+        st.markdown("#### 📋 Säule 1: Das zentrale Derivate-Logbuch (Interaktiv bearbeitbar & Live-Überwachung)")
+        st.caption(
+            "✏️ **Direkt-Bearbeitung:** Klicke doppelt in eine Zelle mit `✏️`, um Werte nachträglich anzupassen. "
+            "Setze links bei **`🗑️`** einen Haken zum Löschen und klicke auf **`💾 Änderungen im Logbuch speichern`**."
+        )
 
-        table_rows = []
+        editor_rows = []
         for ev in evaluated_list:
-            c_sym = ev['currency']
-            earn_str = f"in {ev['earnings_days']} T." if ev['earnings_days'] is not None else "n/a"
-            table_rows.append({
-                "ID": ev['id'],
-                "Ticker": ev['ticker'],
-                "WKN / Typ": f"{ev['wkn']} ({ev['direction']})",
-                "Status": ev['status'],
-                "Haltedauer": f"{ev['days_held']}/{ev['max_hold_days']} T.",
-                "Basiswert (Kauf ➔ Live)": f"{ev['entry_underlying']:.2f} ➔ {ev['current_underlying']:.2f} {c_sym}",
-                "Stop / Ziel 1 / Ziel 2": f"SL:{ev['sl_underlying']:.1f} | T1:{ev['tp1_underlying']:.1f} | T2:{ev['tp2_underlying']:.1f}",
-                "KO-Barriere (heute)": f"{ev['adjusted_ko']:.2f} {c_sym} ({ev['ko_dist_pct']:.1f}%)",
-                "Hebel (Kauf ➔ Real)": f"{ev['initial_leverage']:.1f}x ➔ {ev['real_leverage']:.1f}x",
-                "Schein (Kauf ➔ Live)": f"{ev['entry_cert_eur']:.2f} € ➔ {ev['current_cert_eur']:.2f} €",
-                "G/V (€ / %)": f"{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)",
-                "Depot-Risiko (CRV)": f"{ev['depot_risk_pct']:.2f}% (CRV {ev['crv']})",
-                "Earnings": earn_str,
-                "3-Szenarien-Entscheidung": ev['matrix_scenario']
+            editor_rows.append({
+                "delete": False,
+                "id": ev['id'],
+                "ticker": ev['ticker'],
+                "wkn": ev['wkn'],
+                "direction": ev['direction'],
+                "status": ev['status'],
+                "shares": int(ev['shares']),
+                "entry_cert_eur": float(ev['entry_cert_eur']),
+                "current_cert_eur": float(ev['current_cert_eur']),
+                "pnl_display": f"{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)",
+                "entry_underlying": float(ev['entry_underlying']),
+                "current_underlying": float(ev['current_underlying']),
+                "sl_underlying": float(ev['sl_underlying']),
+                "tp1_underlying": float(ev['tp1_underlying']),
+                "tp2_underlying": float(ev['tp2_underlying']),
+                "initial_ko": float(ev['initial_ko']),
+                "ko_live_display": f"{ev['adjusted_ko']:.2f} ({ev['ko_dist_pct']:.1f}%)",
+                "ratio": float(ev['ratio']),
+                "lev_display": f"{ev['initial_leverage']:.1f}x ➔ {ev['real_leverage']:.1f}x",
+                "max_hold_days": int(ev['max_hold_days']),
+                "matrix_scenario": ev['matrix_scenario']
             })
 
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        edited_log_df = st.data_editor(
+            pd.DataFrame(editor_rows),
+            column_order=[
+                "delete", "ticker", "wkn", "direction", "status", "shares",
+                "entry_cert_eur", "current_cert_eur", "pnl_display",
+                "entry_underlying", "current_underlying", "sl_underlying", "tp1_underlying", "tp2_underlying",
+                "initial_ko", "ko_live_display", "ratio", "lev_display", "max_hold_days", "matrix_scenario"
+            ],
+            column_config={
+                "delete": st.column_config.CheckboxColumn("🗑️", width="small", help="Anhaken zum Löschen", default=False),
+                "id": None,
+                "ticker": st.column_config.TextColumn("Ticker", width="small"),
+                "wkn": st.column_config.TextColumn("WKN ✏️", width="small"),
+                "direction": st.column_config.SelectboxColumn("Typ ✏️", options=["Long", "Short"], width="small", required=True),
+                "status": st.column_config.SelectboxColumn("Status ✏️", options=["Aktiv", "Teilverkauf (Free-Ride)", "Geschlossen"], width="small", required=True),
+                "shares": st.column_config.NumberColumn("Stück ✏️", min_value=1, max_value=100000, step=1, width="small"),
+                "entry_cert_eur": st.column_config.NumberColumn("Kauf (€) ✏️", min_value=0.01, max_value=1000.0, step=0.01, format="%.2f €", width="small"),
+                "current_cert_eur": st.column_config.NumberColumn("Live (€)", format="%.2f €", width="small"),
+                "pnl_display": st.column_config.TextColumn("G/V (Live)", width="small"),
+                "entry_underlying": st.column_config.NumberColumn("Basis-Kauf ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "current_underlying": st.column_config.NumberColumn("Basis-Live", format="%.2f", width="small"),
+                "sl_underlying": st.column_config.NumberColumn("SL (Aktie) ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "tp1_underlying": st.column_config.NumberColumn("Ziel 1 ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "tp2_underlying": st.column_config.NumberColumn("Ziel 2 ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "initial_ko": st.column_config.NumberColumn("Start-KO ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "ko_live_display": st.column_config.TextColumn("KO Heute (Puffer)", width="small"),
+                "ratio": st.column_config.SelectboxColumn("Bezug ✏️", options=[0.001, 0.01, 0.1, 1.0, 10.0], width="small", required=True),
+                "lev_display": st.column_config.TextColumn("Hebel (Kauf➔Live)", width="small"),
+                "max_hold_days": st.column_config.NumberColumn("Max.T ✏️", min_value=1, max_value=365, step=1, width="small"),
+                "matrix_scenario": st.column_config.TextColumn("3-Szenarien-Signal", width="medium")
+            },
+            disabled=["ticker", "current_cert_eur", "pnl_display", "current_underlying", "ko_live_display", "lev_display", "matrix_scenario"],
+            use_container_width=True,
+            hide_index=True,
+            key="portfolio_table_editor"
+        )
+
+        if st.button("💾 Änderungen im Logbuch speichern / Ausgewählte (🗑️) löschen", type="primary"):
+            DerivativesPortfolio.save_edited_positions(edited_log_df.to_dict("records"), eur_usd=eur_usd_live)
+            st.toast("Logbuch erfolgreich aktualisiert!", icon="✅")
+            st.rerun()
 
         st.divider()
         st.markdown("#### 🎯 Säule 3 & 4: Aktive 3-Szenarien-Matrix, TradingView-Alarme & Positions-Steuerung")

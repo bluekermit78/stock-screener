@@ -38,6 +38,44 @@ class DerivativesPortfolio:
         cls.save_data(data)
 
     @classmethod
+    def save_edited_positions(cls, edited_rows: list, eur_usd: float = 1.08):
+        data = cls.load_data()
+        pos_map = {p.get("id"): p for p in data.get("positions", [])}
+        deleted_ids = set()
+
+        for row in edited_rows:
+            pid = row.get("id")
+            if not pid or pid not in pos_map:
+                continue
+            if row.get("delete", False):
+                deleted_ids.add(pid)
+                continue
+
+            p = pos_map[pid]
+            p["wkn"] = str(row.get("wkn", p.get("wkn", "-"))).strip()
+            p["direction"] = str(row.get("direction", p.get("direction", "Long")))
+            p["status"] = str(row.get("status", p.get("status", "Aktiv")))
+            p["shares"] = int(row.get("shares", p.get("shares", 1)))
+            p["entry_cert_eur"] = float(row.get("entry_cert_eur", p.get("entry_cert_eur", 1.0)))
+            p["entry_underlying"] = float(row.get("entry_underlying", p.get("entry_underlying", 100.0)))
+            p["sl_underlying"] = float(row.get("sl_underlying", p.get("sl_underlying", 90.0)))
+            p["tp1_underlying"] = float(row.get("tp1_underlying", p.get("tp1_underlying", 110.0)))
+            p["tp2_underlying"] = float(row.get("tp2_underlying", p.get("tp2_underlying", 120.0)))
+            p["ko_barrier"] = float(row.get("initial_ko", p.get("ko_barrier", 80.0)))
+            p["ratio"] = float(row.get("ratio", p.get("ratio", 0.1)))
+            p["max_hold_days"] = int(row.get("max_hold_days", p.get("max_hold_days", 10)))
+
+            cur = p.get("currency", "$")
+            fx = eur_usd if cur == "$" else 1.0
+            if p["entry_cert_eur"] > 0:
+                p["initial_leverage"] = round(((p["entry_underlying"] / fx) * p["ratio"]) / p["entry_cert_eur"], 2)
+                intr = (abs(p["entry_underlying"] - p["ko_barrier"]) * p["ratio"]) / fx
+                p["premium_eur"] = round(p["entry_cert_eur"] - intr, 2)
+
+        data["positions"] = [pos_map.get(p.get("id"), p) for p in data.get("positions", []) if p.get("id") not in deleted_ids]
+        cls.save_data(data)
+
+    @classmethod
     def update_position_status(cls, pos_id: str, action: str, new_sl_underlying: float = None):
         data = cls.load_data()
         for p in data["positions"]:
@@ -45,7 +83,6 @@ class DerivativesPortfolio:
                 if action == "partial_50":
                     p["shares"] = max(1, int(p["shares"] // 2))
                     p["status"] = "Teilverkauf (Free-Ride)"
-                    # Nach 50% Verkauf Stop-Loss automatisch auf Einstand (Break-Even) ziehen
                     p["sl_underlying"] = p["entry_underlying"]
                 elif action == "move_sl_be":
                     p["sl_underlying"] = p["entry_underlying"]
@@ -92,19 +129,15 @@ class DerivativesPortfolio:
         max_hold_days = int(pos.get("max_hold_days", 10))
         fin_rate_pa = float(pos.get("fin_rate_pa", 7.5)) / 100.0
 
-        # Haltedauer in Tagen berechnen
         try:
             buy_dt = datetime.strptime(pos.get("buy_date", date.today().isoformat()), "%Y-%m-%d").date()
             days_held = max(0, (date.today() - buy_dt).days)
         except Exception:
             days_held = 0
 
-        # Säule 2: Tägliche Anpassung der KO-Barriere durch Finanzierungskosten des Emittenten
-        # Bei Long steigt die Barriere täglich um (Barriere * Jahreszins / 365)
         daily_ko_shift = (initial_ko * fin_rate_pa) / 365.0
         adjusted_ko = round(initial_ko + (daily_ko_shift * days_held), 2) if is_long else round(initial_ko - (daily_ko_shift * days_held), 2)
 
-        # Aktueller innerer Wert + geschätzter Zertifikatspreis in Euro
         ko_dist_abs = (current_underlying - adjusted_ko) if is_long else (adjusted_ko - current_underlying)
         ko_dist_pct = round((ko_dist_abs / current_underlying) * 100, 2) if current_underlying > 0 else 0.0
 
@@ -117,7 +150,6 @@ class DerivativesPortfolio:
             underlying_eur = current_underlying / fx
             real_leverage = round((underlying_eur * ratio) / current_cert_eur, 2) if current_cert_eur > 0 else 0.0
 
-        # Umgerechnete Zertifikats-Kurse für Stop-Loss, TP1 und TP2
         sl_dist = (sl_underlying - adjusted_ko) if is_long else (adjusted_ko - sl_underlying)
         cert_sl_eur = round(max(0.01, ((sl_dist * ratio) / fx) + max(0.0, premium_eur)), 2) if sl_dist > 0 else 0.01
 
@@ -127,22 +159,18 @@ class DerivativesPortfolio:
         tp2_dist = (tp2_underlying - adjusted_ko) if is_long else (adjusted_ko - tp2_underlying)
         cert_tp2_eur = round(max(0.01, ((tp2_dist * ratio) / fx) + max(0.0, premium_eur)), 2)
 
-        # Kapital-, Gewinn- und Risiko-Kennzahlen
         invested_eur = round(shares * entry_cert_eur, 2)
         current_val_eur = round(shares * current_cert_eur, 2)
         pnl_eur = round(current_val_eur - invested_eur, 2)
         pnl_pct = round(((current_cert_eur / entry_cert_eur) - 1.0) * 100, 1) if entry_cert_eur > 0 else 0.0
 
-        # Ursprüngliches Risiko beim Kauf vs. aktuelles offenes Risiko bis SL
         initial_risk_eur = round(shares * max(0.0, entry_cert_eur - cert_sl_eur), 2)
         depot_risk_pct = round((initial_risk_eur / total_capital) * 100, 2) if total_capital > 0 else 0.0
 
-        # Initiales CRV (Chance-Risiko-Verhältnis zu Ziel 2)
         risk_per_share = max(0.01, entry_cert_eur - cert_sl_eur)
         reward_per_share = max(0.0, cert_tp2_eur - entry_cert_eur)
         crv = round(reward_per_share / risk_per_share, 2)
 
-        # --- SÄULE 3: DIE 3-SZENARIEN-EXIT-MATRIX ---
         init_lev = float(pos.get("initial_leverage", real_leverage))
         status = pos.get("status", "Aktiv")
 
@@ -150,7 +178,6 @@ class DerivativesPortfolio:
         matrix_action = "Stop-Loss bei Scalable aktiv lassen & Basiswert-Alarme überwachen."
         urgency = "normal"
 
-        # 1. Prüfung auf Szenario B (Hard Exit / Stop-Loss oder KO-Gefahr)
         sl_broken = (is_long and current_underlying <= sl_underlying) or (not is_long and current_underlying >= sl_underlying)
         if ko_dist_pct <= 0:
             matrix_scenario = "💀 KNOCK-OUT EREIGNIS"
@@ -164,8 +191,6 @@ class DerivativesPortfolio:
             matrix_scenario = "🚨 SZENARIO B: AKUTE KO-GEFAHR (<3.5%)"
             matrix_action = f"Nur noch {ko_dist_pct}% bis zur Barriere ({adjusted_ko:.2f} {cur})! Exponentielles Totalverlustrisiko – sofort glattstellen!"
             urgency = "critical"
-
-        # 2. Prüfung auf Szenario C (Event- & Zeit-Exit)
         elif earnings_days is not None and 0 <= earnings_days <= 5:
             matrix_scenario = f"⚠️ SZENARIO C: EARNINGS-WARNUNG (in {earnings_days} Tagen)"
             matrix_action = "Quartalszahlen stehen unmittelbar bevor! Hohes Overnight-Gap-Risiko – Position vor den Zahlen glattstellen oder halbieren."
@@ -174,8 +199,6 @@ class DerivativesPortfolio:
             matrix_scenario = f"⏰ SZENARIO C: ZEIT-STOPP ({days_held}/{max_hold_days} Tage)"
             matrix_action = f"Trade stagniert seit {days_held} Tagen (Finanzierungskosten fressen Barriere auf). Kapital freimachen!"
             urgency = "warning"
-
-        # 3. Prüfung auf Szenario A (Take-Profit, Free-Ride & Hebel-Kompression)
         elif (is_long and current_underlying >= tp2_underlying) or (not is_long and current_underlying <= tp2_underlying):
             matrix_scenario = "🏆 SZENARIO A: HAUPTZIEL 2 ERREICHT"
             matrix_action = f"Basiswert hat Hauptziel 2 ({tp2_underlying:.2f} {cur}) erreicht! Kompletten Gewinn sichern oder engen Trailing-Stopp setzen."
