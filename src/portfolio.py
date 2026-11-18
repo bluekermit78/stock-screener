@@ -73,8 +73,25 @@ class DerivativesPortfolio:
 
             if p["entry_cert_eur"] > 0:
                 p["initial_leverage"] = round(((p["entry_underlying"] / fx) * p["ratio"]) / p["entry_cert_eur"], 2)
+
+            # Prüfen, ob der Nutzer den aktuellen Live-Scheinpreis (€) zur Kalibrierung angepasst hat
+            old_live_cert = float(row.get("_orig_current_cert_eur", 0.0))
+            new_live_cert = float(row.get("current_cert_eur", old_live_cert))
+            curr_u = float(row.get("current_underlying", p["entry_underlying"]))
+            if abs(new_live_cert - old_live_cert) >= 0.005:
+                try:
+                    buy_dt = datetime.strptime(p.get("buy_date", date.today().isoformat()), "%Y-%m-%d").date()
+                    d_held = max(0, (date.today() - buy_dt).days)
+                except Exception:
+                    d_held = 0
+                fin_r = float(p.get("fin_rate_pa", 7.5)) / 100.0
+                d_shift = (p["ko_barrier"] * fin_r) / 365.0
+                a_ko = (p["ko_barrier"] + d_shift * d_held) if is_long else (p["ko_barrier"] - d_shift * d_held)
+                live_intr = ((curr_u - a_ko) * p["ratio"] / fx) if is_long else ((a_ko - curr_u) * p["ratio"] / fx)
+                p["premium_eur"] = round(new_live_cert - max(0.0, live_intr), 3)
+            elif "premium_eur" not in p:
                 intr = (abs(p["entry_underlying"] - p["ko_barrier"]) * p["ratio"]) / fx
-                p["premium_eur"] = round(p["entry_cert_eur"] - intr, 2)
+                p["premium_eur"] = round(p["entry_cert_eur"] - intr, 3)
 
             new_sl_u = float(row.get("sl_underlying", old_sl_u))
             new_cert_sl = float(row.get("cert_sl_eur", old_cert_sl))
@@ -169,7 +186,7 @@ class DerivativesPortfolio:
             real_leverage = 0.0
         else:
             intrinsic_eur = (ko_dist_abs * ratio) / fx
-            current_cert_eur = round(max(0.01, intrinsic_eur + max(0.0, premium_eur)), 2)
+            current_cert_eur = round(max(0.01, intrinsic_eur + premium_eur), 2)
             underlying_eur = current_underlying / fx
             real_leverage = round((underlying_eur * ratio) / current_cert_eur, 2) if current_cert_eur > 0 else 0.0
 
