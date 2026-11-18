@@ -52,13 +52,15 @@ class DerivativesPortfolio:
                 continue
 
             p = pos_map[pid]
+            old_sl_u = float(p.get("sl_underlying", 90.0))
+            old_cert_sl = float(row.get("_orig_cert_sl_eur", 0.0))
+
             p["wkn"] = str(row.get("wkn", p.get("wkn", "-"))).strip()
             p["direction"] = str(row.get("direction", p.get("direction", "Long")))
             p["status"] = str(row.get("status", p.get("status", "Aktiv")))
             p["shares"] = int(row.get("shares", p.get("shares", 1)))
             p["entry_cert_eur"] = float(row.get("entry_cert_eur", p.get("entry_cert_eur", 1.0)))
             p["entry_underlying"] = float(row.get("entry_underlying", p.get("entry_underlying", 100.0)))
-            p["sl_underlying"] = float(row.get("sl_underlying", p.get("sl_underlying", 90.0)))
             p["tp1_underlying"] = float(row.get("tp1_underlying", p.get("tp1_underlying", 110.0)))
             p["tp2_underlying"] = float(row.get("tp2_underlying", p.get("tp2_underlying", 120.0)))
             p["ko_barrier"] = float(row.get("initial_ko", p.get("ko_barrier", 80.0)))
@@ -67,10 +69,31 @@ class DerivativesPortfolio:
 
             cur = p.get("currency", "$")
             fx = eur_usd if cur == "$" else 1.0
+            is_long = p["direction"].lower().startswith("long")
+
             if p["entry_cert_eur"] > 0:
                 p["initial_leverage"] = round(((p["entry_underlying"] / fx) * p["ratio"]) / p["entry_cert_eur"], 2)
                 intr = (abs(p["entry_underlying"] - p["ko_barrier"]) * p["ratio"]) / fx
                 p["premium_eur"] = round(p["entry_cert_eur"] - intr, 2)
+
+            new_sl_u = float(row.get("sl_underlying", old_sl_u))
+            new_cert_sl = float(row.get("cert_sl_eur", old_cert_sl))
+
+            # Prüfen, ob der Nutzer den Stop-Preis des Zertifikats (€) in der Tabelle geändert hat
+            if abs(new_cert_sl - old_cert_sl) >= 0.005 and abs(new_sl_u - old_sl_u) < 0.005:
+                try:
+                    buy_dt = datetime.strptime(p.get("buy_date", date.today().isoformat()), "%Y-%m-%d").date()
+                    days_held = max(0, (date.today() - buy_dt).days)
+                except Exception:
+                    days_held = 0
+                fin_rate_pa = float(p.get("fin_rate_pa", 7.5)) / 100.0
+                daily_shift = (p["ko_barrier"] * fin_rate_pa) / 365.0
+                adj_ko = (p["ko_barrier"] + daily_shift * days_held) if is_long else (p["ko_barrier"] - daily_shift * days_held)
+                prem = max(0.0, float(p.get("premium_eur", 0.03)))
+                sl_dist_u = (max(0.0, new_cert_sl - prem) * fx) / p["ratio"]
+                p["sl_underlying"] = round(adj_ko + sl_dist_u if is_long else adj_ko - sl_dist_u, 2)
+            else:
+                p["sl_underlying"] = round(new_sl_u, 2)
 
         data["positions"] = [pos_map.get(p.get("id"), p) for p in data.get("positions", []) if p.get("id") not in deleted_ids]
         cls.save_data(data)
@@ -185,7 +208,7 @@ class DerivativesPortfolio:
             urgency = "critical"
         elif sl_broken:
             matrix_scenario = "🚨 SZENARIO B: HARD EXIT (Stop-Loss gerissen!)"
-            matrix_action = f"Basiswert ({current_underlying:.2f} {cur}) hat deinen Stop-Loss ({sl_underlying:.2f} {cur}) unterschritten! Sofort verkaufen – nicht nachkaufen!"
+            matrix_action = f"Basiswert ({current_underlying:.2f} {cur}) hat deinen Stop-Loss ({sl_underlying:.2f} {cur} / Schein {cert_sl_eur:.2f} €) unterschritten! Sofort verkaufen!"
             urgency = "critical"
         elif ko_dist_pct < 3.5:
             matrix_scenario = "🚨 SZENARIO B: AKUTE KO-GEFAHR (<3.5%)"
@@ -213,7 +236,7 @@ class DerivativesPortfolio:
             urgency = "success"
         elif pnl_pct >= 25.0 and ((is_long and sl_underlying < entry_underlying) or (not is_long and sl_underlying > entry_underlying)):
             matrix_scenario = "📈 SZENARIO A: TRAILING-STOPP NACHZIEHEN"
-            matrix_action = f"Solider Buchgewinn (+{pnl_pct:.1f}%). Ziehe den Stop-Loss im Basiswert auf deinen Einstiegskurs ({entry_underlying:.2f} {cur} = Break-Even) nach!"
+            matrix_action = f"Solider Buchgewinn (+{pnl_pct:.1f}%). Ziehe den Stop-Loss auf deinen Einstiegskurs ({entry_underlying:.2f} {cur} / {entry_cert_eur:.2f} € = Break-Even) nach!"
             urgency = "info"
 
         return {

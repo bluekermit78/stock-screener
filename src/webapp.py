@@ -341,12 +341,31 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
     default_tp1_stock = round(price + (default_tp2_stock - price) * 0.55, 2)
 
     with p_col3:
-        sl_stock = st.number_input(
-            f"Dein Stop-Loss im Aktienchart ({cur}):",
-            value=float(default_sl_stock), step=0.25,
-            help="Kurs der Aktie, bei dem du die Reißleine ziehst (muss zwischen aktuellem Kurs und KO-Schwelle liegen!).",
-            key=f"{key_prefix}_slstock"
+        sl_input_mode = st.radio(
+            "Stop-Loss Vorgabe als:",
+            [f"Basiswert ({cur})", "Zertifikat Stop-Preis (€)"],
+            horizontal=True,
+            key=f"{key_prefix}_slmode"
         )
+        default_cert_sl = max(0.01, round(cert_ask_eur - ((abs(price - default_sl_stock) * ratio) / eur_usd), 2))
+        if sl_input_mode.startswith("Basiswert"):
+            sl_stock = st.number_input(
+                f"Stop-Loss im Aktienchart ({cur}):",
+                value=float(default_sl_stock), step=0.25,
+                help=f"Entspricht ca. {default_cert_sl:.2f} € im Zertifikat.",
+                key=f"{key_prefix}_slstock"
+            )
+        else:
+            user_cert_sl = st.number_input(
+                "Dein Stop-Preis bei Scalable (€):",
+                min_value=0.01, max_value=float(cert_ask_eur), value=float(default_cert_sl), step=0.01,
+                help="Der Stop-Loss-Kurs in Euro, den du bei Scalable für das Zertifikat eingibst.",
+                key=f"{key_prefix}_slcert"
+            )
+            cert_diff_eur = max(0.0, cert_ask_eur - user_cert_sl)
+            stock_diff_calc = (cert_diff_eur * eur_usd) / ratio if ratio > 0 else 0.0
+            sl_stock = round((price - stock_diff_calc) if is_long else (price + stock_diff_calc), 2)
+            st.caption(f"↳ Entspricht Basiswert-Stopp bei **`{sl_stock:.2f} {cur}`**")
     with p_col4:
         entry_type = st.selectbox(
             "Einstiegs-Art bei Scalable:",
@@ -806,6 +825,8 @@ with tab_port:
                 "pnl_display": f"{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)",
                 "entry_underlying": float(ev['entry_underlying']),
                 "current_underlying": float(ev['current_underlying']),
+                "cert_sl_eur": float(ev['cert_sl_eur']),
+                "_orig_cert_sl_eur": float(ev['cert_sl_eur']),
                 "sl_underlying": float(ev['sl_underlying']),
                 "tp1_underlying": float(ev['tp1_underlying']),
                 "tp2_underlying": float(ev['tp2_underlying']),
@@ -822,7 +843,7 @@ with tab_port:
             column_order=[
                 "delete", "ticker", "wkn", "direction", "status", "shares",
                 "entry_cert_eur", "current_cert_eur", "pnl_display",
-                "entry_underlying", "current_underlying", "sl_underlying", "tp1_underlying", "tp2_underlying",
+                "entry_underlying", "current_underlying", "cert_sl_eur", "sl_underlying", "tp1_underlying", "tp2_underlying",
                 "initial_ko", "ko_live_display", "ratio", "lev_display", "max_hold_days", "matrix_scenario"
             ],
             column_config={
@@ -837,8 +858,10 @@ with tab_port:
                 "current_cert_eur": st.column_config.NumberColumn("Live (€)", format="%.2f €", width="small"),
                 "pnl_display": st.column_config.TextColumn("G/V (Live)", width="small"),
                 "entry_underlying": st.column_config.NumberColumn("Basis-Kauf ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "_orig_cert_sl_eur": None,
                 "current_underlying": st.column_config.NumberColumn("Basis-Live", format="%.2f", width="small"),
-                "sl_underlying": st.column_config.NumberColumn("SL (Aktie) ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
+                "cert_sl_eur": st.column_config.NumberColumn("SL Schein (€) ✏️", min_value=0.01, step=0.01, format="%.2f €", width="small", help="Stop-Preis des Zertifikats in € bei Scalable (ändert automatisch SL Aktie)"),
+                "sl_underlying": st.column_config.NumberColumn("SL (Aktie) ✏️", min_value=0.01, step=0.5, format="%.2f", width="small", help="Chart-Stop-Loss im Basiswert (ändert automatisch SL Schein €)"),
                 "tp1_underlying": st.column_config.NumberColumn("Ziel 1 ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
                 "tp2_underlying": st.column_config.NumberColumn("Ziel 2 ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
                 "initial_ko": st.column_config.NumberColumn("Start-KO ✏️", min_value=0.01, step=0.5, format="%.2f", width="small"),
@@ -908,7 +931,16 @@ with tab_port:
                         DerivativesPortfolio.update_position_status(ev['id'], "move_sl_be")
                         st.rerun()
                 with b3:
-                    new_sl_val = st.number_input(f"Trailing-SL anpassen ({c_sym}):", value=float(ev['sl_underlying']), step=0.5, key=f"inp_sl_{ev['id']}")
+                    tr_mode = st.radio("SL-Eingabe:", [f"Aktie ({c_sym})", "Schein (€)"], horizontal=True, key=f"trm_{ev['id']}")
+                    if tr_mode.startswith("Aktie"):
+                        new_sl_val = st.number_input(f"Neuer SL ({c_sym}):", value=float(ev['sl_underlying']), step=0.5, key=f"inp_sl_{ev['id']}")
+                    else:
+                        new_cert_sl_in = st.number_input("Neuer SL Schein (€):", min_value=0.01, value=float(ev['cert_sl_eur']), step=0.01, key=f"inp_csl_{ev['id']}")
+                        fx_tr = eur_usd_live if c_sym == "$" else 1.0
+                        prem_tr = max(0.0, ev['current_cert_eur'] - ((abs(ev['current_underlying'] - ev['adjusted_ko']) * ev['ratio']) / fx_tr))
+                        dist_u_tr = (max(0.0, new_cert_sl_in - prem_tr) * fx_tr) / ev['ratio']
+                        new_sl_val = round((ev['adjusted_ko'] + dist_u_tr) if ev['direction'] == "Long" else (ev['adjusted_ko'] - dist_u_tr), 2)
+                        st.caption(f"↳ Basiswert-SL: `{new_sl_val:.2f} {c_sym}`")
                     if st.button("📈 Neuen SL speichern", key=f"act_sl_{ev['id']}", use_container_width=True):
                         DerivativesPortfolio.update_position_status(ev['id'], "update_sl", new_sl_val)
                         st.rerun()
@@ -941,7 +973,12 @@ with tab_port:
             with m_c2:
                 m_cur = "€" if m_ticker.endswith(".DE") else "$"
                 m_entry_u = st.number_input(f"Kurs Basiswert bei Kauf ({m_cur}):", min_value=0.1, value=150.0, step=1.0)
-                m_sl_u = st.number_input(f"Chart-Stop-Loss Basiswert ({m_cur}):", min_value=0.1, value=144.0, step=0.5)
+                m_sl_type = st.radio("Stop-Loss eingeben als:", [f"Chart-SL Basiswert ({m_cur})", "Scalable Stop-Preis (€)"], horizontal=True, key="man_sl_type")
+                if m_sl_type.startswith("Chart"):
+                    m_sl_u = st.number_input(f"Chart-Stop-Loss Basiswert ({m_cur}):", min_value=0.1, value=144.0, step=0.5)
+                else:
+                    m_sl_cert_in = st.number_input("Scalable Stop-Preis Zertifikat (€):", min_value=0.01, value=1.50, step=0.05)
+                    m_sl_u = None
                 m_tp1_u = st.number_input(f"Kursziel 1 (50% Exit, {m_cur}):", min_value=0.1, value=158.0, step=0.5)
                 m_tp2_u = st.number_input(f"Kursziel 2 (Hauptziel, {m_cur}):", min_value=0.1, value=166.0, step=0.5)
             with m_c3:
@@ -955,6 +992,10 @@ with tab_port:
                 init_lev_m = round(((m_entry_u / fx_m) * m_ratio) / m_entry_cert, 2) if m_entry_cert > 0 else 5.0
                 intr_m = (abs(m_entry_u - m_ko) * m_ratio) / fx_m
                 prem_m = round(m_entry_cert - intr_m, 2)
+                if m_sl_u is None:
+                    diff_eur_m = max(0.0, m_entry_cert - m_sl_cert_in)
+                    diff_u_m = (diff_eur_m * fx_m) / m_ratio
+                    m_sl_u = round((m_entry_u - diff_u_m) if m_dir == "Long" else (m_entry_u + diff_u_m), 2)
                 DerivativesPortfolio.add_position({
                     "ticker": m_ticker,
                     "name": m_ticker,
