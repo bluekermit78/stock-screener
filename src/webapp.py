@@ -177,6 +177,147 @@ def plot_intraday_chart(df_intra: pd.DataFrame, eval_res: dict, ticker: str):
     fig.update_layout(height=740, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
+def plot_portfolio_overview(evaluated_list: list):
+    active = [x for x in evaluated_list if x['status'] != "Geschlossen"]
+    if not active:
+        return
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        shared_yaxes=True,
+        column_widths=[0.66, 0.34],
+        horizontal_spacing=0.05,
+        subplot_titles=(
+            "🎯 Positions-Radar: 💀 KO (0%) ➔ 🛡️ Stop-Loss ➔ ⚪ Kauf ➔ ⭐ LIVE ➔ 💰 Ziel 1 ➔ 🏆 Ziel 2 (100%)",
+            "💶 Aktueller Gewinn / Verlust (€ & %) vs. Geplantes SL-Risiko"
+        )
+    )
+
+    labels = []
+    ko_x, sl_x, entry_x, curr_x, tp1_x, tp2_x = [], [], [], [], [], []
+    ko_txt, sl_txt, entry_txt, curr_txt, tp1_txt, tp2_txt = [], [], [], [], [], []
+    pnl_vals, pnl_colors, pnl_texts, risk_vals = [], [], [], []
+
+    for ev in reversed(active):
+        cur = ev['currency']
+        lbl = f"<b>{ev['ticker']}</b> ({ev['wkn']} | {ev['direction']})"
+        labels.append(lbl)
+
+        is_long = ev['direction'] == "Long"
+        ko = ev['adjusted_ko']
+        tp2 = ev['tp2_underlying']
+        span = (tp2 - ko) if is_long else (ko - tp2)
+        if abs(span) < 1e-6:
+            span = 1.0
+
+        def norm(val):
+            pct = ((val - ko) / span * 100.0) if is_long else ((ko - val) / span * 100.0)
+            return round(max(-15.0, min(130.0, pct)), 1)
+
+        n_ko = 0.0
+        n_sl = norm(ev['sl_underlying'])
+        n_ent = norm(ev['entry_underlying'])
+        n_cur = norm(ev['current_underlying'])
+        n_tp1 = norm(ev['tp1_underlying'])
+        n_tp2 = 100.0
+
+        # Hintergrund-Leitlinie (0% bis 100%) + Rote Gefahrenzone (KO bis SL)
+        fig.add_trace(go.Scatter(
+            x=[0, 100], y=[lbl, lbl], mode="lines",
+            line=dict(color="#343a40", width=10), showlegend=False, hoverinfo="skip"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[0, max(0, n_sl)], y=[lbl, lbl], mode="lines",
+            line=dict(color="rgba(239, 71, 111, 0.45)", width=10), showlegend=False, hoverinfo="skip"
+        ), row=1, col=1)
+
+        ko_x.append(n_ko)
+        ko_txt.append(f"KO-Schwelle: {ko:.2f} {cur} (0.00 €) | Puffer: {ev['ko_dist_pct']:.1f}%")
+
+        sl_x.append(n_sl)
+        sl_txt.append(f"Stop-Loss: {ev['sl_underlying']:.2f} {cur} (Schein: {ev['cert_sl_eur']:.2f} €)")
+
+        entry_x.append(n_ent)
+        entry_txt.append(f"Kaufkurs: {ev['entry_underlying']:.2f} {cur} (Schein: {ev['entry_cert_eur']:.2f} €)")
+
+        curr_x.append(n_cur)
+        curr_txt.append(f"LIVE-Stand: {ev['current_underlying']:.2f} {cur} (Schein: {ev['current_cert_eur']:.2f} € | Hebel: {ev['real_leverage']:.1f}x)")
+
+        tp1_x.append(n_tp1)
+        tp1_txt.append(f"Ziel 1 (50% Free-Ride): {ev['tp1_underlying']:.2f} {cur} (Schein: {ev['cert_tp1_eur']:.2f} €)")
+
+        tp2_x.append(n_tp2)
+        tp2_txt.append(f"Hauptziel 2: {ev['tp2_underlying']:.2f} {cur} (Schein: {ev['cert_tp2_eur']:.2f} €)")
+
+        pnl_vals.append(ev['pnl_eur'])
+        pnl_colors.append("#06d6a0" if ev['pnl_eur'] >= 0 else "#ef476f")
+        pnl_texts.append(f"{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)")
+        risk_vals.append(-abs(ev['initial_risk_eur']))
+
+    # Marker für die 6 Schlüsselmarken auf der normierten Skala hinzufügen
+    fig.add_trace(go.Scatter(
+        x=ko_x, y=labels, mode="markers", name="💀 KO-Schwelle (0%)",
+        marker=dict(symbol="x", size=13, color="#ff0055", line=dict(width=2)),
+        text=ko_txt, hovertemplate="%{y}<br>%{text}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=sl_x, y=labels, mode="markers", name="🛡️ Stop-Loss",
+        marker=dict(symbol="line-ns", size=18, color="#ff9f1c", line=dict(width=4, color="#ff9f1c")),
+        text=sl_txt, hovertemplate="%{y}<br>%{text}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=entry_x, y=labels, mode="markers", name="⚪ Kaufkurs (Einstieg)",
+        marker=dict(symbol="circle-open", size=12, color="#adb5bd", line=dict(width=2.5)),
+        text=entry_txt, hovertemplate="%{y}<br>%{text}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=tp1_x, y=labels, mode="markers", name="💰 Ziel 1 (50% Free-Ride)",
+        marker=dict(symbol="diamond", size=12, color="#4cc9f0"),
+        text=tp1_txt, hovertemplate="%{y}<br>%{text}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=tp2_x, y=labels, mode="markers", name="🏆 Hauptziel 2 (100%)",
+        marker=dict(symbol="triangle-right", size=13, color="#06d6a0"),
+        text=tp2_txt, hovertemplate="%{y}<br>%{text}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=curr_x, y=labels, mode="markers+text", name="⭐ Aktueller LIVE-Stand",
+        marker=dict(symbol="star", size=17, color="#ffd166", line=dict(width=1.5, color="#000000")),
+        text=[f"  {ev['current_cert_eur']:.2f}€" for ev in reversed(active)],
+        textposition="top center",
+        hovertext=curr_txt, hovertemplate="%{y}<br>%{hovertext}<extra></extra>"
+    ), row=1, col=1)
+
+    # Rechts: G/V-Balkenchart + geplantes SL-Risiko als Referenz
+    fig.add_trace(go.Bar(
+        x=pnl_vals, y=labels, orientation="h", name="Aktueller G/V (€)",
+        marker_color=pnl_colors, text=pnl_texts, textposition="auto",
+        hovertemplate="%{y}<br>Aktueller G/V: %{text}<extra></extra>"
+    ), row=1, col=2)
+
+    fig.add_trace(go.Scatter(
+        x=risk_vals, y=labels, mode="markers", name="Geplantes Max. SL-Risiko (-€)",
+        marker=dict(symbol="line-ns", size=16, color="#ff9f1c", line=dict(width=3, color="#ff9f1c")),
+        hovertemplate="%{y}<br>Geplantes Risiko bis SL: %{x:.2f} €<extra></extra>"
+    ), row=1, col=2)
+
+    fig.update_xaxes(title_text="Positionsspanne in % (0% = KO-Schwelle | 100% = Hauptziel 2)", range=[-10, 118], zeroline=False, row=1, col=1)
+    fig.update_xaxes(title_text="Gewinn / Verlust in Euro (€)", zeroline=True, zerolinewidth=2, zerolinecolor="#adb5bd", row=1, col=2)
+
+    chart_h = max(320, 110 + len(active) * 65)
+    fig.update_layout(
+        height=chart_h,
+        template="plotly_dark",
+        margin=dict(l=20, r=20, t=55, b=35),
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: dict = None, is_intraday_view: bool = False):
     deriv = DerivativesAdvisor.analyze_derivatives(df_hist, sel_data, intra_eval)
     if not deriv:
@@ -802,6 +943,10 @@ with tab_port:
         k3.metric("Gesamtes Stop-Loss-Risiko", f"{total_open_risk:.2f} €", f"{total_risk_pct:.2f}% vom Trading-Kapital", delta_color="off")
         min_ko_puffer = min(x['ko_dist_pct'] for x in evaluated_list)
         k4.metric("Kleinster KO-Abstand im Depot", f"{min_ko_puffer:.2f} %", "Unter 5% = erhöhte Vorsicht!", delta_color="off")
+
+        st.divider()
+        st.markdown("#### 📊 Visuelles Derivate-Cockpit (Abstand zu KO, Stop-Loss, Live-Stand & Gewinn/Verlust)")
+        plot_portfolio_overview(evaluated_list)
 
         st.divider()
         st.markdown("#### 📋 Säule 1: Das zentrale Derivate-Logbuch (Interaktiv bearbeitbar & Live-Überwachung)")
