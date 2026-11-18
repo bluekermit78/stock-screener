@@ -1,6 +1,7 @@
 import os
 import json
 import yaml
+from datetime import date
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -11,6 +12,7 @@ from indicators import TechnicalIndicators
 from advisor import InvestmentAdvisor
 from intraday import IntradayAnalyzer
 from derivatives import DerivativesAdvisor
+from portfolio import DerivativesPortfolio
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -93,6 +95,10 @@ def fetch_fundamentals(ticker: str) -> dict:
         }
     except Exception:
         return {"name": ticker, "sector": "n/a", "pe": None, "fcf_yield": None, "rev_growth": None}
+
+@st.cache_data(ttl=3600)
+def fetch_cached_earnings_days(ticker: str):
+    return DerivativesPortfolio.get_next_earnings_days(ticker)
 
 def plot_chart(df: pd.DataFrame, ticker: str):
     df_plot = df.tail(180)
@@ -318,7 +324,7 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
     with p_col1:
         sizing_mode = st.selectbox(
             "Wie möchtest du die Größe bestimmen?",
-            ["1. Nach maximalem Risiko (in €)", "2. Fester Zielbetrag (Investition in €)", "3. Feste Stückzahl (Anteile)"],
+            ["1. Nach maximalem Risiko (in € / 1-2% Regel)", "2. Fester Zielbetrag (Investition in €)", "3. Feste Stückzahl (Anteile)"],
             key=f"{key_prefix}_smode"
         )
     with p_col2:
@@ -331,7 +337,8 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
 
     atr_val = float(sel_data['atr'])
     default_sl_stock = float(active_ko['mental_sl']) if (is_long == default_is_long) else round(price - 1.5 * atr_val if is_long else price + 1.5 * atr_val, 2)
-    default_tp_stock = float(active_ko['target']) if (is_long == default_is_long) else round(price + 2.5 * atr_val if is_long else price - 2.5 * atr_val, 2)
+    default_tp2_stock = float(active_ko['target']) if (is_long == default_is_long) else round(price + 2.5 * atr_val if is_long else price - 2.5 * atr_val, 2)
+    default_tp1_stock = round(price + (default_tp2_stock - price) * 0.55, 2)
 
     with p_col3:
         sl_stock = st.number_input(
@@ -360,8 +367,8 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
     actual_loss_per_share = max(0.01, round(cert_ask_eur - cert_sl_eur, 2))
     cert_loss_pct = (actual_loss_per_share / cert_ask_eur) * 100
 
-    stock_diff_to_tp = abs(default_tp_stock - price)
-    cert_gain_per_share_eur = (stock_diff_to_tp * ratio) / eur_usd
+    stock_diff_to_tp2 = abs(default_tp2_stock - price)
+    cert_gain_per_share_eur = (stock_diff_to_tp2 * ratio) / eur_usd
     cert_tp_eur = round(cert_ask_eur + cert_gain_per_share_eur, 2)
     cert_gain_pct = (cert_gain_per_share_eur / cert_ask_eur) * 100
 
@@ -406,44 +413,82 @@ def render_derivatives_panel(df_hist: pd.DataFrame, sel_data: dict, intra_eval: 
             f"**🛡️ B. Eingabe direkt NACH dem Kauf (Verkaufs-Absicherung / Stop-Loss):**\n\n"
             f"- **Stop-Loss STOP-Preis (Auslöser bei Aktie {sl_stock:.2f} {cur}):** **`{cert_sl_eur:.2f} €`** *(-{cert_loss_pct:.1f}%)*\n"
             f"- **Stop-Loss LIMIT-Preis (Mindestverkaufspreis):** **`{sell_sl_limit_eur:.2f} €`** *(Puffer für sichere Ausführung)*\n"
-            f"- **Optionales Gewinnziel (Limit-Verkauf bei Aktie {default_tp_stock:.2f} {cur}):** **`{cert_tp_eur:.2f} €`** *(+{cert_gain_pct:.1f}%)*\n"
+            f"- **Teilverkauf 50% (Free-Ride bei Ziel 1 = {default_tp1_stock:.2f} {cur}) / Hauptziel 2 ({default_tp2_stock:.2f} {cur}):** **`{cert_tp_eur:.2f} €`** *(+{cert_gain_pct:.1f}%)*\n"
             f"- **Dein exaktes Euro-Ergebnis:** Risiko bis Stop-Loss: **`-{total_risk_eur:.2f} €`** | Gewinn am Ziel: **`+{total_profit_eur:.2f} €`**"
         )
 
+    # --- 1-KLICK ÜBERNAHME INS DERIVATE-LOGBUCH (SÄULE 1 & 2) ---
+    with st.expander("📌 Diesen Trade nach Kauf direkt in '💼 Mein Derivate-Depot (Logbuch)' übernehmen"):
+        l1, l2, l3, l4, l5 = st.columns(5)
+        with l1:
+            wkn_in = st.text_input("WKN / ISIN (optional):", placeholder="z. B. PC8XYZ", key=f"{key_prefix}_wkn")
+        with l2:
+            issuer_in = st.selectbox("Emittent:", ["BNP Paribas", "HSBC", "Vontobel", "UniCredit", "Société Générale", "Goldman Sachs"], key=f"{key_prefix}_iss")
+        with l3:
+            tp1_in = st.number_input(f"Kursziel 1 (50% Teilverkauf, {cur}):", value=float(default_tp1_stock), step=0.5, key=f"{key_prefix}_tp1")
+        with l4:
+            tp2_in = st.number_input(f"Kursziel 2 (Hauptziel, {cur}):", value=float(default_tp2_stock), step=0.5, key=f"{key_prefix}_tp2")
+        with l5:
+            max_days_in = st.number_input("Zeit-Stopp (Max. Handelstage):", min_value=1, max_value=90, value=5 if is_intraday_view else 12, key=f"{key_prefix}_mdays")
+
+        if st.button("💾 Trade jetzt im Derivate-Logbuch speichern", key=f"{key_prefix}_save_btn", use_container_width=True):
+            DerivativesPortfolio.add_position({
+                "ticker": sel_data['ticker'],
+                "name": sel_data['name'],
+                "wkn": wkn_in.strip().upper() or "KO-TURBO",
+                "issuer": issuer_in,
+                "direction": "Long" if is_long else "Short",
+                "buy_date": date.today().isoformat(),
+                "shares": int(shares),
+                "entry_cert_eur": float(cert_ask_eur),
+                "entry_underlying": float(price),
+                "sl_underlying": float(sl_stock),
+                "tp1_underlying": float(tp1_in),
+                "tp2_underlying": float(tp2_in),
+                "ko_barrier": float(user_ko_barrier),
+                "ratio": float(ratio),
+                "initial_leverage": float(eff_leverage),
+                "premium_eur": float(premium_eur),
+                "currency": cur,
+                "max_hold_days": int(max_days_in),
+                "fin_rate_pa": 7.5,
+                "status": "Aktiv"
+            })
+            st.success(f"Trade für {sel_data['ticker']} ({shares} Stück à {cert_ask_eur:.2f} €) wurde im Reiter '💼 Mein Derivate-Depot' gespeichert!")
+
 st.title("🏛️ Persönlicher Aktien- & Derivate-Anlageberater")
 st.markdown(
-    "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)**, **fundamentale Bewertung** "
-    "und einen eigenen Reiter für den **Scalable Capital Derivate- & Knock-Out-Assistenten**."
+    "Dieses Dashboard kombiniert **technische Chartanalyse**, **Intraday-Signale (VWAP, Pivots, ORB)**, **fundamentale Bewertung**, "
+    "den **Scalable Capital Order-Assistenten** und ein **4-Säulen Derivate-Depot-Management**."
 )
 
-with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Scalable-Order-Typen"):
+with st.expander("📖 Lexikon & Methodik: Indikatoren, Intraday-Marken & Das 4-Säulen-Derivate-Management"):
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         st.markdown("""
-        **📈 Swing- & Trend-Indikatoren (Tageschart)**
-        * **RSI (Relative Strength Index, 14):** Misst die Dynamik auf einer Skala von 0 bis 100 (**<30** überverkauft, **>70** überkauft).
-        * **EMA 20 / SMA 50 / SMA 200:** Gleitende Durchschnittskurse der letzten 20, 50 bzw. 200 Handelstage.
-        * **MACD & Bollinger-Bänder:** Zeigen Trendwechsel und statistische Übertreibungen an.
+        **📈 Swing- & Intraday-Indikatoren**
+        * **RSI (14), EMA 20, SMA 50/200, MACD & Bollinger:** Klassische Trend- und Rebound-Indikatoren im Tageschart.
+        * **VWAP & Opening Range (ORB):** Institutioneller Tages-Durchschnittspreis und 30-Minuten-Ausbruchsspanne im 5m-Chart.
+        * **Floor Pivots ($P, R_1, R_2, S_1, S_2$):** Mathematische Tages-Widerstände und -Unterstützungen aus dem Vortag.
         """)
     with col_g2:
         st.markdown("""
-        **⚡ Intraday-Trading-Indikatoren (5-Minuten-Chart)**
-        * **VWAP (Volume Weighted Average Price):** Volumengewichteter Durchschnittspreis des heutigen Tages. Kurse **über VWAP** = Bullisch (Long-Bias), **unter VWAP** = Bärisch.
-        * **ORB (Opening Range Breakout):** Hoch- und Tiefpunkt der ersten 30 Handelsminuten.
-        * **Pivot-Punkte ($P, R_1, R_2, S_1, S_2$):** Aus dem Vortag berechnete Unterstützungs- und Widerstandszonen.
+        **🛡️ Säule 1 & 2: Logbuch & Pre-Trade-Regeln**
+        * **Basiswert-Entkopplung:** Stop-Loss und Kursziele werden immer im Chart der Aktie festgelegt und erst über das Bezugsverhältnis in Euro-Zertifikatspreise umgerechnet.
+        * **1–2 % Risiko-Deckel:** Pro Trade maximal 1–2 % des gesamten Trading-Kapitals bis zum Stop-Loss riskieren.
+        * **Barriere-Drift:** Bei Open-End-Turbos verschiebt der Emittent die KO-Schwelle täglich um die Zinskosten (~7,5 % p.a.).
         """)
     with col_g3:
         st.markdown("""
-        **📱 Scalable Capital Order-Zusätze erklärt**
-        * **LIMIT hinzufügen (beim Kauf):** Legt fest, was du pro Zertifikat maximal bezahlst. Setze immer ein eigenes Limit (ca. 1 % über Briefkurs), statt die 4 %-Standard-Toleranz von Scalable zu nutzen.
-        * **STOP hinzufügen (beim Kauf = Stop-Buy):** Nützlich für Ausbrüche (Breakouts). Die Order schläft, bis das Zertifikat auf den STOP-Preis steigt, und kauft erst dann automatisch bis zum LIMIT-Preis.
-        * **Stop-Loss Limit (nach dem Kauf):** Sichert deine Position nach unten ab. Fällt der Schein auf den STOP-Kurs, wird er zum LIMIT-Kurs verkauft, bevor ein Knock-Out droht.
+        **🎯 Säule 3 & 4: Die 3-Szenarien-Exit-Matrix**
+        * **Szenario A (Gewinn):** Bei **+100 % Gewinn** oder **Ziel 1** werden **50 % verkauft (Free-Ride)**. Sinkt der Real-Hebel stark ab (*Hebel-Kompression*), wird gerollt.
+        * **Szenario B (Hard Exit):** Bricht der Basiswert unter den Chart-Stop-Loss, wird sofort verkauft (*No Averaging Down!*).
+        * **Szenario C (Time & Event Exit):** Stagniert der Trade über das Zeit-Limit hinaus oder stehen **Quartalszahlen (Earnings)** in <5 Tagen an, wird wegen Overnight-Gap-Gefahr glattgestellt.
         """)
 
 config = load_config()
 current_focus_list = [t.strip().upper() for t in config.get('universe', ['AAPL', 'MSFT', 'NVDA', 'CARR', 'SAP.DE', 'SIE.DE'])]
 
-# Fokus-Daten einmal zentral laden, damit Tab 1 (Charts) und Tab 2 (Derivate) verzögerungsfrei darauf zugreifen
 watchlist_results = []
 for t in current_focus_list:
     df_t = fetch_single_history(t)
@@ -459,18 +504,18 @@ for t in current_focus_list:
 if "active_focus_ticker" not in st.session_state or st.session_state["active_focus_ticker"] not in current_focus_list:
     st.session_state["active_focus_ticker"] = current_focus_list[0] if current_focus_list else "AAPL"
 
-tab1, tab_deriv, tab2, tab3 = st.tabs([
+tab1, tab_deriv, tab_port, tab2, tab3 = st.tabs([
     "🎯 Meine Fokus-Aktien (Charts & Intraday)",
     "⚡ Derivate & Scalable-Assistent",
+    "💼 Mein Derivate-Depot (Logbuch & Exit-Matrix)",
     "🌍 Indizes & Markt-Kompass",
-    "🔍 Gesamtmarkt-Screener (S&P 500 / DAX / MDAX)"
+    "🔍 Gesamtmarkt-Screener"
 ])
 
 with tab1:
     st.subheader("Persönliche Watchlist & Detail-Chartanalyse")
     st.caption(
-        "Hier werden deine Fokus-Aktien auf drei Zeitebenen sowie im 5-Minuten-Intraday-Chart analysiert. "
-        "Für Knock-Outs, Optionsscheine und die Scalable-Ordermaske wechsle einfach in den Reiter **'⚡ Derivate & Scalable-Assistent'**."
+        "Hier werden deine Fokus-Aktien auf drei Zeitebenen sowie im 5-Minuten-Intraday-Chart analysiert."
     )
 
     col_cfg, col_sel = st.columns([2, 1])
@@ -639,7 +684,7 @@ with tab1:
 with tab_deriv:
     st.subheader("⚡ Derivate-Playbook & Scalable Capital Order-Assistent")
     st.caption(
-        "Dediziertes Terminal für **Knock-Out-Zertifikate (Turbos), Optionsscheine und Faktor-Zertifikate** auf Echtzeit-Kursbasis (inkl. Live-EUR/USD-Umrechnung)."
+        "Dediziertes Terminal für **Knock-Out-Zertifikate (Turbos), Optionsscheine und Faktor-Zertifikate** auf Echtzeit-Kursbasis (inkl. 1-Klick-Übernahme ins Derivate-Logbuch)."
     )
 
     if watchlist_results:
@@ -674,6 +719,217 @@ with tab_deriv:
             render_derivatives_panel(df_hist_deriv, sel_deriv_data, intra_eval=intra_eval_deriv, is_intraday_view=is_intra_mode)
     else:
         st.info("Bitte füge zuerst mindestens eine Fokus-Aktie in Tab 1 hinzu.")
+
+with tab_port:
+    st.subheader("💼 Mein Derivate-Depot: 4-Säulen-Logbuch & 3-Szenarien-Exit-Matrix")
+    st.caption(
+        "Trennt strikt zwischen der Chart-Analyse des Basiswerts und der positionsbezogenen Derivate-Steuerung (inkl. automatischer Zins-Anpassung der KO-Barriere, Hebel-Kompressions-Check und Earnings-Warnung)."
+    )
+
+    port_data = DerivativesPortfolio.load_data()
+    eur_usd_live = fetch_eur_usd_rate()
+
+    # Kopfzeile: Trading-Kapital (für 1-2% Risiko-Deckel) & Live-Refresh
+    top_p1, top_p2, top_p3 = st.columns([1.5, 2.0, 1.0])
+    with top_p1:
+        new_cap = st.number_input(
+            "Gesamtes Trading-Kapital für Derivate (in €):",
+            min_value=500.0, max_value=1000000.0, value=float(port_data.get("capital", 10000.0)), step=500.0,
+            help="Dient als Basis für die 1%- bis 2%-Risiko-Regel pro Knock-Out-Trade."
+        )
+        if new_cap != port_data.get("capital"):
+            port_data["capital"] = new_cap
+            DerivativesPortfolio.save_data(port_data)
+    with top_p2:
+        st.info(
+            f"**🛡️ Dein Pre-Trade Risiko-Deckel (1 % bis 2 % Regel):**  \n"
+            f"Maximal erlaubtes Risiko pro Position (Kaufkurs bis Stop-Loss): **`{new_cap*0.01:.0f} €` (1 %)** bis **`{new_cap*0.02:.0f} €` (2 %)**"
+        )
+    with top_p3:
+        st.write("")
+        if st.button("🔄 Depot & Live-Kurse prüfen", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    positions = port_data.get("positions", [])
+    active_positions = [p for p in positions if p.get("status") != "Geschlossen"]
+
+    # Alle aktiven Positionen live gegen aktuelle 5m-Kurse & Earnings evaluieren
+    evaluated_list = []
+    for p in active_positions:
+        t_sym = p.get("ticker", "AAPL")
+        df_i_p, piv_p = fetch_cached_intraday(t_sym, interval="5m", include_prepost=not t_sym.endswith(".DE"))
+        if not df_i_p.empty:
+            live_u_price = float(df_i_p['Close'].iloc[-1])
+        else:
+            df_h_p = fetch_single_history(t_sym, period="1mo")
+            live_u_price = float(df_h_p['Close'].iloc[-1]) if not df_h_p.empty else float(p.get("entry_underlying", 100.0))
+
+        e_days = fetch_cached_earnings_days(t_sym)
+        ev = DerivativesPortfolio.evaluate_position(p, live_u_price, eur_usd_live, new_cap, earnings_days=e_days)
+        evaluated_list.append(ev)
+
+    if evaluated_list:
+        total_invested = sum(x['invested_eur'] for x in evaluated_list)
+        total_current = sum(x['current_val_eur'] for x in evaluated_list)
+        total_pnl = total_current - total_invested
+        total_pnl_pct = ((total_current / total_invested) - 1.0) * 100 if total_invested > 0 else 0.0
+        total_open_risk = sum(x['initial_risk_eur'] for x in evaluated_list)
+        total_risk_pct = (total_open_risk / new_cap) * 100 if new_cap > 0 else 0.0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Gebundenes Kapital (Aktiv)", f"{total_invested:.2f} €", f"{len(evaluated_list)} offene Position(en)", delta_color="off")
+        k2.metric("Aktueller Positionswert", f"{total_current:.2f} €", f"{total_pnl:+.2f} € ({total_pnl_pct:+.1f}%)")
+        k3.metric("Gesamtes Stop-Loss-Risiko", f"{total_open_risk:.2f} €", f"{total_risk_pct:.2f}% vom Trading-Kapital", delta_color="off")
+        min_ko_puffer = min(x['ko_dist_pct'] for x in evaluated_list)
+        k4.metric("Kleinster KO-Abstand im Depot", f"{min_ko_puffer:.2f} %", "Unter 5% = erhöhte Vorsicht!", delta_color="off")
+
+        st.divider()
+        st.markdown("#### 📋 Säule 1: Das zentrale Derivate-Logbuch (Live-Überwachung)")
+
+        table_rows = []
+        for ev in evaluated_list:
+            c_sym = ev['currency']
+            earn_str = f"in {ev['earnings_days']} T." if ev['earnings_days'] is not None else "n/a"
+            table_rows.append({
+                "ID": ev['id'],
+                "Ticker": ev['ticker'],
+                "WKN / Typ": f"{ev['wkn']} ({ev['direction']})",
+                "Status": ev['status'],
+                "Haltedauer": f"{ev['days_held']}/{ev['max_hold_days']} T.",
+                "Basiswert (Kauf ➔ Live)": f"{ev['entry_underlying']:.2f} ➔ {ev['current_underlying']:.2f} {c_sym}",
+                "Stop / Ziel 1 / Ziel 2": f"SL:{ev['sl_underlying']:.1f} | T1:{ev['tp1_underlying']:.1f} | T2:{ev['tp2_underlying']:.1f}",
+                "KO-Barriere (heute)": f"{ev['adjusted_ko']:.2f} {c_sym} ({ev['ko_dist_pct']:.1f}%)",
+                "Hebel (Kauf ➔ Real)": f"{ev['initial_leverage']:.1f}x ➔ {ev['real_leverage']:.1f}x",
+                "Schein (Kauf ➔ Live)": f"{ev['entry_cert_eur']:.2f} € ➔ {ev['current_cert_eur']:.2f} €",
+                "G/V (€ / %)": f"{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)",
+                "Depot-Risiko (CRV)": f"{ev['depot_risk_pct']:.2f}% (CRV {ev['crv']})",
+                "Earnings": earn_str,
+                "3-Szenarien-Entscheidung": ev['matrix_scenario']
+            })
+
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("#### 🎯 Säule 3 & 4: Aktive 3-Szenarien-Matrix, TradingView-Alarme & Positions-Steuerung")
+
+        for ev in evaluated_list:
+            c_sym = ev['currency']
+            box_title = (
+                f"**{ev['ticker']} ({ev['name']})** | WKN: `{ev['wkn']}` ({ev['direction']}) | "
+                f"**{ev['shares']} Stück** | G/V: **`{ev['pnl_eur']:+.2f} € ({ev['pnl_pct']:+.1f}%)`** | "
+                f"**{ev['matrix_scenario']}**"
+            )
+            with st.expander(box_title, expanded=(ev['urgency'] in ("critical", "warning", "success"))):
+                if ev['urgency'] == "critical":
+                    st.error(f"**Handlungsanweisung (Szenario B – Hard Exit):** {ev['matrix_action']}")
+                elif ev['urgency'] == "warning":
+                    st.warning(f"**Handlungsanweisung (Szenario C – Time/Event Exit):** {ev['matrix_action']}")
+                elif ev['urgency'] == "success":
+                    st.success(f"**Handlungsanweisung (Szenario A – Take-Profit / De-Risking):** {ev['matrix_action']}")
+                else:
+                    st.info(f"**Status (Planmäßig):** {ev['matrix_action']}")
+
+                w_col1, w_col2 = st.columns(2)
+                with w_col1:
+                    st.markdown(
+                        f"**🔔 Liste 1: Preisalarme im Basiswert-Chart (z. B. TradingView für `{ev['ticker']}`):**\n"
+                        f"- **🚨 Hard-Exit Alarm (Stop-Loss):** `{ev['sl_underlying']:.2f} {c_sym}`\n"
+                        f"- **💰 50% Free-Ride Alarm (Kursziel 1):** `{ev['tp1_underlying']:.2f} {c_sym}`\n"
+                        f"- **🏆 Hauptziel Alarm (Kursziel 2):** `{ev['tp2_underlying']:.2f} {c_sym}`\n"
+                        f"- **💀 Angepasste KO-Barriere heute (inkl. Zins-Drift):** `{ev['adjusted_ko']:.2f} {c_sym}` *(Start-KO war {ev['initial_ko']:.2f} {c_sym})*"
+                    )
+                with w_col2:
+                    sl_limit_puffer = max(0.01, round(ev['cert_sl_eur'] * 0.985, 2))
+                    st.markdown(
+                        f"**📱 Liste 2: Umgerechnete Zertifikats-Preise für Scalable Capital (`{ev['wkn']}`):**\n"
+                        f"- **Stop-Loss Order (für alle {ev['shares']} Stück):** STOP **`{ev['cert_sl_eur']:.2f} €`** | LIMIT **`{sl_limit_puffer:.2f} €`**\n"
+                        f"- **Limit-Verkauf für erste 50% ({max(1, ev['shares']//2)} Stück bei Ziel 1):** **`{ev['cert_tp1_eur']:.2f} €`**\n"
+                        f"- **Limit-Verkauf für Restposition (bei Hauptziel 2):** **`{ev['cert_tp2_eur']:.2f} €`**\n"
+                        f"- **Aktueller Real-Hebel:** `{ev['real_leverage']:.2f}x` *(Start-Hebel: {ev['initial_leverage']:.2f}x)*"
+                    )
+
+                b1, b2, b3, b4 = st.columns(4)
+                with b1:
+                    if st.button("💰 50% Teilverkauf buchen (Free-Ride + SL auf Einstieg)", key=f"act_p50_{ev['id']}", use_container_width=True):
+                        DerivativesPortfolio.update_position_status(ev['id'], "partial_50")
+                        st.rerun()
+                with b2:
+                    if st.button("🛡️ Stop-Loss auf Break-Even (Einstieg) ziehen", key=f"act_be_{ev['id']}", use_container_width=True):
+                        DerivativesPortfolio.update_position_status(ev['id'], "move_sl_be")
+                        st.rerun()
+                with b3:
+                    new_sl_val = st.number_input(f"Trailing-SL anpassen ({c_sym}):", value=float(ev['sl_underlying']), step=0.5, key=f"inp_sl_{ev['id']}")
+                    if st.button("📈 Neuen SL speichern", key=f"act_sl_{ev['id']}", use_container_width=True):
+                        DerivativesPortfolio.update_position_status(ev['id'], "update_sl", new_sl_val)
+                        st.rerun()
+                with b4:
+                    st.write("")
+                    if st.button("❌ Position schließen / löschen", key=f"act_del_{ev['id']}", use_container_width=True):
+                        DerivativesPortfolio.update_position_status(ev['id'], "delete")
+                        st.rerun()
+    else:
+        st.info("Noch keine offenen Derivate-Positionen im Logbuch. Übernimm einen Trade direkt aus dem Reiter **'⚡ Derivate & Scalable-Assistent'** oder trage ihn unten manuell ein.")
+
+    st.divider()
+    col_chk, col_man = st.columns([1, 1])
+    with col_chk:
+        st.markdown("#### ✅ Pre-Trade & Wochenend-Review Checkliste")
+        st.checkbox("1. Liegt die KO-Barriere deutlich hinter dem charttechnischen Stop-Loss im Basiswert?", value=False, key="chk_1")
+        st.checkbox("2. Beträgt das Euro-Risiko bis zum Stop-Loss maximal 1 % bis 2 % meines Trading-Kapitals?", value=False, key="chk_2")
+        st.checkbox("3. Stehen in den nächsten 5 Tagen KEINE Quartalszahlen (Earnings) oder Zinsentscheide an?", value=False, key="chk_3")
+        st.checkbox("4. Sind die Preisalarme im Basiswert-Chart (SL, Ziel 1, Ziel 2) und der Stop-Loss bei Scalable platziert?", value=False, key="chk_4")
+        st.checkbox("5. Wochenend-Review: Haben alle offenen Positionen noch >5 % KO-Abstand und einen gesunden Real-Hebel?", value=False, key="chk_5")
+
+    with col_man:
+        with st.expander("➕ Bestehendes Derivat manuell ins Logbuch eintragen"):
+            m_c1, m_c2, m_c3 = st.columns(3)
+            with m_c1:
+                m_ticker = st.text_input("Basiswert-Ticker (z. B. NVDA, MSFT, SAP.DE):", value="NVDA").strip().upper()
+                m_wkn = st.text_input("WKN / ISIN:", value="PC8XYZ").strip().upper()
+                m_dir = st.selectbox("Richtung:", ["Long", "Short"])
+                m_shares = st.number_input("Stückzahl:", min_value=1, value=100, step=10)
+            with m_c2:
+                m_cur = "€" if m_ticker.endswith(".DE") else "$"
+                m_entry_u = st.number_input(f"Kurs Basiswert bei Kauf ({m_cur}):", min_value=0.1, value=150.0, step=1.0)
+                m_sl_u = st.number_input(f"Chart-Stop-Loss Basiswert ({m_cur}):", min_value=0.1, value=144.0, step=0.5)
+                m_tp1_u = st.number_input(f"Kursziel 1 (50% Exit, {m_cur}):", min_value=0.1, value=158.0, step=0.5)
+                m_tp2_u = st.number_input(f"Kursziel 2 (Hauptziel, {m_cur}):", min_value=0.1, value=166.0, step=0.5)
+            with m_c3:
+                m_ko = st.number_input(f"KO-Barriere bei Kauf ({m_cur}):", min_value=0.1, value=130.0, step=0.5)
+                m_entry_cert = st.number_input("Kaufkurs Zertifikat (€):", min_value=0.01, value=2.05, step=0.05)
+                m_ratio = st.selectbox("Bezugsverhältnis:", [0.10, 0.01, 1.00], index=0)
+                m_bdate = st.date_input("Kaufdatum:", value=date.today())
+
+            if st.button("➕ Manuelle Position speichern", use_container_width=True):
+                fx_m = eur_usd_live if m_cur == "$" else 1.0
+                init_lev_m = round(((m_entry_u / fx_m) * m_ratio) / m_entry_cert, 2) if m_entry_cert > 0 else 5.0
+                intr_m = (abs(m_entry_u - m_ko) * m_ratio) / fx_m
+                prem_m = round(m_entry_cert - intr_m, 2)
+                DerivativesPortfolio.add_position({
+                    "ticker": m_ticker,
+                    "name": m_ticker,
+                    "wkn": m_wkn,
+                    "issuer": "Manuell",
+                    "direction": m_dir,
+                    "buy_date": m_bdate.isoformat(),
+                    "shares": int(m_shares),
+                    "entry_cert_eur": float(m_entry_cert),
+                    "entry_underlying": float(m_entry_u),
+                    "sl_underlying": float(m_sl_u),
+                    "tp1_underlying": float(m_tp1_u),
+                    "tp2_underlying": float(m_tp2_u),
+                    "ko_barrier": float(m_ko),
+                    "ratio": float(m_ratio),
+                    "initial_leverage": float(init_lev_m),
+                    "premium_eur": float(prem_m),
+                    "currency": m_cur,
+                    "max_hold_days": 10,
+                    "fin_rate_pa": 7.5,
+                    "status": "Aktiv"
+                })
+                st.success("Position erfolgreich ins Logbuch aufgenommen!")
+                st.rerun()
 
 with tab2:
     st.subheader("Globale Leitindizes im Performance- & Trend-Check")
