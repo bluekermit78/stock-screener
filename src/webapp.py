@@ -12,7 +12,8 @@ from indicators import TechnicalIndicators
 from advisor import InvestmentAdvisor
 from intraday import IntradayAnalyzer
 from derivatives import DerivativesAdvisor
-from portfolio import DerivativesPortfolio
+from dataclasses import asdict
+from portfolio import DerivativesPortfolio, DerivateSpec
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -1098,6 +1099,48 @@ with tab_port:
                         st.rerun()
     else:
         st.info("Noch keine offenen Derivate-Positionen im Logbuch. Übernimm einen Trade direkt aus dem Reiter **'⚡ Derivate & Scalable-Assistent'** oder trage ihn unten manuell ein.")
+
+    st.divider()
+    with st.expander("🔌 Scalable CLI (`sc`) Sync, 3-Tranchen-Matrix & Order-Preview", expanded=False):
+        if st.button("📥 Bestand via `sc broker holdings` syncen"):
+            try:
+                added_n, warns = DerivativesPortfolio.sync_holdings_from_sc(eur_usd=eur_usd_live)
+                for w_msg in warns:
+                    st.warning(w_msg)
+                st.toast(f"SC-Sync: +{added_n} Position(en)", icon="🔄")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"SC-Sync fehlgeschlagen: {exc}")
+
+        if active_evals:
+            sel_ev_id = st.selectbox(
+                "Position für 3-Tranchen-Matrix & `sc` Preview wählen:",
+                options=[x["id"] for x in active_evals],
+                format_func=lambda pid: next((f"{x['ticker']} | {x['wkn']} ({x['shares']} Stk.)" for x in active_evals if x["id"] == pid), pid),
+                key="sc_tranche_pos_select"
+            )
+            ev_sel = next(x for x in active_evals if x["id"] == sel_ev_id)
+            spec_obj = DerivativesPortfolio.fetch_derivate_spec_by_isin(ev_sel["wkn"], eur_usd=eur_usd_live)
+            if not spec_obj:
+                fx_val = round(1.0 / eur_usd_live, 6) if (ev_sel["currency"] == "$" and eur_usd_live > 0) else 1.0
+                spec_obj = DerivateSpec(ev_sel["wkn"], ev_sel["ticker"], "LONG" if ev_sel["direction"] == "Long" else "SHORT",
+                                        float(ev_sel["adjusted_ko"]), float(ev_sel["adjusted_ko"]), float(ev_sel["ratio"]), fx_val)
+
+            tranches = DerivativesPortfolio.build_three_scenario_tranches(int(ev_sel["shares"]), spec_obj, float(ev_sel["current_underlying"]))
+            if tranches:
+                st.dataframe(pd.DataFrame([asdict(t) for t in tranches]), use_container_width=True, hide_index=True)
+                if st.button("🔍 Order-Preview über `sc` erzeugen (ohne --confirm)", key="btn_sc_preview"):
+                    try:
+                        st.session_state["sc_previews"] = DerivativesPortfolio.preview_tranche_orders(ev_sel["wkn"], int(ev_sel["shares"]), tranches)
+                    except Exception as exc:
+                        st.error(f"Preview-Fehler: {exc}")
+
+            if st.session_state.get("sc_previews"):
+                allow_exec = st.checkbox("Stückzahl & Limit geprüft – Ausführung (--confirm) freigeben", value=False, key="sc_allow_exec")
+                for idx, pv in enumerate(st.session_state["sc_previews"]):
+                    st.code(f"{pv['scenario']} | {pv['isin']} | {pv['quantity']} Stk. @ {pv['limit_price']:.2f} € | ID: {pv['confirm_id'] or 'n/a'}")
+                    if st.button(f"🚀 Bestätigen #{idx+1}", key=f"btn_sc_conf_{idx}", disabled=not allow_exec):
+                        st.success(DerivativesPortfolio.confirm_preview_order(pv, auto_confirm=allow_exec))
 
     st.divider()
     col_chk, col_man = st.columns([1, 1])
