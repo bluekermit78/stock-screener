@@ -114,41 +114,122 @@ class DerivativesPortfolio:
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(res.stdout)
 
+    @staticmethod
+    def _parse_sc_derivative_name(name: str, isin: str) -> dict:
+        text = str(name or "").strip()
+        upper = text.upper()
+        direction = "SHORT" if " SHORT " in f" {upper} " else "LONG"
+
+        ko_match = re.search(r"(?:LONG|SHORT)\s+([0-9]+(?:[.,][0-9]+)?)", text, flags=re.IGNORECASE)
+        ko_val = float(ko_match.group(1).replace(",", ".")) if ko_match else None
+
+        is_usd = ("$" in text) or ("USD" in upper)
+        underlying_map = {
+            "SKYWORKS SOLUTIONS": ("SWKS", "$"),
+            "NVIDIA": ("NVDA", "$"),
+            "WEST PHARMACEUTIC": ("WST", "$"),
+            "WEST PHARMACEUTICAL": ("WST", "$"),
+        }
+        ticker = isin
+        cur = "$" if is_usd else "€"
+        for key, (sym, c) in underlying_map.items():
+            if key in upper:
+                ticker = sym
+                cur = c
+                break
+
+        known_issuers = ("HSBC", "BNP", "MS", "MORGAN STANLEY", "VONTOBEL", "CITI", "SOCIETE GENERALE", "SG", "DZ BANK", "UBS")
+        issuer = "Scalable Sync"
+        parts = text.split()
+        if parts and parts[-1].upper() in {i.upper() for i in known_issuers}:
+            issuer = parts[-1]
+
+        return {
+            "ticker": ticker,
+            "direction": direction,
+            "ko_barrier": ko_val,
+            "currency": cur,
+            "issuer": issuer,
+        }
+
     @classmethod
     def sync_holdings_from_sc(cls, eur_usd: float = 1.08) -> tuple[int, list[str]]:
         holdings_data = cls.run_sc_json(["broker", "holdings"])
-        raw_positions = holdings_data if isinstance(holdings_data, list) else holdings_data.get("holdings", [])
+        warnings: list[str] = []
+
+        res_obj = ((holdings_data.get("data") or {}).get("result")) if isinstance(holdings_data, dict) else {}
+        raw_positions = res_obj.get("items", []) if isinstance(res_obj, dict) else []
+
         port = cls.load_data()
-        existing = {str(p.get("wkn", "")).strip().upper() for p in port.get("positions", []) if p.get("status") != "Geschlossen"}
-        added_count, warnings = 0, []
+        existing = {
+            str(p.get("wkn", "")).strip().upper()
+            for p in port.get("positions", [])
+            if p.get("status") != "Geschlossen"
+        }
+
+        added_count = 0
         for item in raw_positions:
+            if not isinstance(item, dict):
+                continue
             isin = str(item.get("isin") or item.get("wkn") or "").strip().upper()
-            qty = int(item.get("quantity") or item.get("shares") or 0)
+            try:
+                qty = int(float(item.get("quantity") or 0))
+            except Exception:
+                qty = 0
+
             if not isin or qty <= 0 or isin in existing:
                 continue
-            entry_cert = float(item.get("buyPrice") or item.get("averagePrice") or item.get("price") or 1.0)
+
+            entry_cert = float(
+                item.get("fifo_price")
+                if item.get("fifo_price") is not None
+                else item.get("quote_mid_price")
+                or 1.0
+            )
+            name_str = str(item.get("name") or isin).strip()
+            parsed = cls._parse_sc_derivative_name(name_str, isin)
             spec = cls.fetch_derivate_spec_by_isin(isin, eur_usd=eur_usd)
-            if not spec:
-                warnings.append(f"Keine Stammdaten für {isin} ({item.get('name', 'Unbekannt')}) gefunden.")
-                continue
-            is_long = spec.direction == "LONG"
-            cur = "€" if spec.underlying_symbol.endswith(".DE") else "$"
+
+            is_long = (spec.direction == "LONG") if spec else (parsed["direction"] == "LONG")
+            ticker = spec.underlying_symbol if (spec and spec.underlying_symbol != "UNKNOWN") else parsed["ticker"]
+            cur = "€" if ticker.endswith(".DE") else parsed["currency"]
             fx = eur_usd if cur == "$" else 1.0
-            init_u = spec.strike * (1.08 if is_long else 0.92)
-            ko_val = spec.knock_out if spec.knock_out is not None else round(init_u * (0.85 if is_long else 1.15), 2)
+            ratio = spec.ratio if spec else 0.01
+
+            ko_val = (
+                spec.knock_out
+                if (spec and spec.knock_out is not None)
+                else (parsed["ko_barrier"] if parsed["ko_barrier"] is not None else round(entry_cert * 10.0, 2))
+            )
+            init_u = round(ko_val * (1.08 if is_long else 0.92), 2) if ko_val else round(entry_cert * 10.0, 2)
+
             port["positions"].append({
-                "id": str(uuid.uuid4())[:8], "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "ticker": spec.underlying_symbol, "name": str(item.get("name") or spec.underlying_symbol),
-                "wkn": isin, "issuer": "Scalable Sync", "direction": "Long" if is_long else "Short",
-                "buy_date": date.today().isoformat(), "shares": qty, "entry_cert_eur": round(entry_cert, 2),
-                "entry_underlying": round(init_u, 2), "sl_underlying": round(init_u * (0.96 if is_long else 1.04), 2),
+                "id": str(uuid.uuid4())[:8],
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "ticker": ticker,
+                "name": name_str,
+                "wkn": isin,
+                "issuer": parsed["issuer"],
+                "direction": "Long" if is_long else "Short",
+                "buy_date": date.today().isoformat(),
+                "shares": qty,
+                "entry_cert_eur": round(entry_cert, 2),
+                "entry_underlying": init_u,
+                "sl_underlying": round(init_u * (0.96 if is_long else 1.04), 2),
                 "tp1_underlying": round(init_u * (1.05 if is_long else 0.95), 2),
                 "tp2_underlying": round(init_u * (1.12 if is_long else 0.88), 2),
-                "ko_barrier": ko_val, "ratio": spec.ratio,
-                "initial_leverage": round(((init_u / fx) * spec.ratio) / max(0.01, entry_cert), 2),
-                "premium_eur": 0.03, "currency": cur, "max_hold_days": 10, "fin_rate_pa": 7.5, "status": "Aktiv",
+                "ko_barrier": ko_val,
+                "ratio": ratio,
+                "initial_leverage": round(((init_u / fx) * ratio) / max(0.01, entry_cert), 2),
+                "premium_eur": 0.03,
+                "currency": cur,
+                "max_hold_days": 10,
+                "fin_rate_pa": 7.5,
+                "status": "Aktiv",
             })
+            existing.add(isin)
             added_count += 1
+
         if added_count > 0:
             cls.save_data(port)
         return added_count, warnings
