@@ -1,4 +1,5 @@
 import os
+import time
 import re
 import json
 import uuid
@@ -108,6 +109,8 @@ class DerivativesPortfolio:
     def run_sc_json(cls, args: list[str]):
         if args[:2] == ["broker", "holdings"]:
             remote_args = ["holdings"]
+        elif args[:2] == ["broker", "quote"]:
+            remote_args = ["quote"] + [a for a in args[2:] if a != "--json"]
         elif args[:3] == ["broker", "trade", "sell"]:
             remote_args = ["preview-sell"] + [a for a in args[3:] if a != "--json"]
         else:
@@ -408,6 +411,27 @@ class DerivativesPortfolio:
             pass
         return None
 
+    _sc_quote_cache: dict[str, tuple[float, dict]] = {}
+
+    @classmethod
+    def fetch_sc_quote(cls, isin: str, ttl_sec: float = 45.0) -> dict | None:
+        isin_clean = str(isin or "").strip().upper()
+        if not isin_clean:
+            return None
+        now = time.monotonic()
+        cached = cls._sc_quote_cache.get(isin_clean)
+        if cached and (now - cached[0]) <= ttl_sec:
+            return cached[1]
+        try:
+            payload = cls.run_sc_json(["broker", "quote", "--isin", isin_clean])
+            res = ((payload.get("data") or {}).get("result")) if isinstance(payload, dict) else None
+            if isinstance(res, dict):
+                cls._sc_quote_cache[isin_clean] = (now, res)
+                return res
+        except Exception:
+            pass
+        return cached[1] if cached else None
+
     @classmethod
     def evaluate_position(cls, pos: dict, current_underlying: float, eur_usd: float, total_capital: float, earnings_days: int = None) -> dict:
         is_long = pos.get("direction", "Long").lower().startswith("long")
@@ -429,8 +453,25 @@ class DerivativesPortfolio:
         adjusted_ko = round(initial_ko + shift * days_held if is_long else initial_ko - shift * days_held, 2)
         ko_dist_abs = (current_underlying - adjusted_ko) if is_long else (adjusted_ko - current_underlying)
         ko_dist_pct = round((ko_dist_abs / current_underlying) * 100, 2) if current_underlying > 0 else 0.0
-        if ko_dist_abs <= 0:
+        sc_q = cls.fetch_sc_quote(str(pos.get("wkn", "")))
+        sc_price = None
+        if isinstance(sc_q, dict):
+            for k in ("quote_bid_price", "quote_mid_price", "quote_ask_price"):
+                v = sc_q.get(k)
+                if v is not None:
+                    try:
+                        fv = float(v)
+                        if fv > 0:
+                            sc_price = round(fv, 2)
+                            break
+                    except Exception:
+                        pass
+
+        if ko_dist_abs <= 0 and sc_price is None:
             current_cert_eur, real_leverage = 0.001, 0.0
+        elif sc_price is not None:
+            current_cert_eur = sc_price
+            real_leverage = round(((current_underlying / fx) * ratio) / current_cert_eur, 2) if current_cert_eur > 0 else 0.0
         else:
             current_cert_eur = round(max(0.01, ((ko_dist_abs * ratio) / fx) + premium_eur), 2)
             real_leverage = round(((current_underlying / fx) * ratio) / current_cert_eur, 2) if current_cert_eur > 0 else 0.0
