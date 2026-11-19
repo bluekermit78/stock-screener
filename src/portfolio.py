@@ -12,6 +12,7 @@ import yfinance as yf
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORTFOLIO_PATH = os.path.join(BASE_DIR, "data", "derivatives_portfolio.json")
+STOCKS_PATH = os.path.join(BASE_DIR, "data", "stocks_portfolio.json")
 STAMMDATEN_CACHE_PATH = os.path.join(BASE_DIR, "data", "derivate_stammdaten_cache.json")
 
 
@@ -153,6 +154,24 @@ class DerivativesPortfolio:
             "issuer": issuer,
         }
 
+    @staticmethod
+    def load_stocks_data() -> dict:
+        if os.path.exists(STOCKS_PATH):
+            try:
+                with open(STOCKS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    data.setdefault("positions", [])
+                    return data
+            except Exception:
+                pass
+        return {"positions": []}
+
+    @staticmethod
+    def save_stocks_data(data: dict) -> None:
+        os.makedirs(os.path.dirname(STOCKS_PATH), exist_ok=True)
+        with open(STOCKS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
     @classmethod
     def sync_holdings_from_sc(cls, eur_usd: float = 1.08) -> tuple[int, list[str]]:
         holdings_data = cls.run_sc_json(["broker", "holdings"])
@@ -162,13 +181,15 @@ class DerivativesPortfolio:
         raw_positions = res_obj.get("items", []) if isinstance(res_obj, dict) else []
 
         port = cls.load_data()
-        existing = {
+        existing_deriv = {
             str(p.get("wkn", "")).strip().upper()
             for p in port.get("positions", [])
             if p.get("status") != "Geschlossen"
         }
 
-        added_count = 0
+        stock_positions = []
+        added_deriv = 0
+
         for item in raw_positions:
             if not isinstance(item, dict):
                 continue
@@ -178,16 +199,39 @@ class DerivativesPortfolio:
             except Exception:
                 qty = 0
 
-            if not isin or qty <= 0 or isin in existing:
+            if not isin or qty <= 0:
                 continue
 
-            entry_cert = float(
-                item.get("fifo_price")
-                if item.get("fifo_price") is not None
-                else item.get("quote_mid_price")
-                or 1.0
-            )
+            sec_type = str(item.get("security_type") or "").strip().upper()
             name_str = str(item.get("name") or isin).strip()
+            fifo_eur = float(item.get("fifo_price") if item.get("fifo_price") is not None else (item.get("quote_mid_price") or 0.0))
+            mid_eur = float(item.get("quote_mid_price") if item.get("quote_mid_price") is not None else fifo_eur)
+            val_eur = float(item.get("valuation") if item.get("valuation") is not None else round(qty * mid_eur, 2))
+
+            if sec_type != "DERIVATIVE":
+                inv_eur = round(qty * fifo_eur, 2)
+                pnl_eur = round(val_eur - inv_eur, 2)
+                pnl_pct = round(((mid_eur / fifo_eur) - 1.0) * 100, 2) if fifo_eur > 0 else 0.0
+                stock_positions.append({
+                    "isin": isin,
+                    "name": name_str,
+                    "security_type": sec_type or "STOCK",
+                    "shares": qty,
+                    "fifo_eur": round(fifo_eur, 2),
+                    "current_eur": round(mid_eur, 2),
+                    "invested_eur": inv_eur,
+                    "valuation_eur": round(val_eur, 2),
+                    "pnl_eur": pnl_eur,
+                    "pnl_pct": pnl_pct,
+                    "venue": str(item.get("quote_venue") or "-"),
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+                continue
+
+            if isin in existing_deriv:
+                continue
+
+            entry_cert = fifo_eur if fifo_eur > 0 else 1.0
             parsed = cls._parse_sc_derivative_name(name_str, isin)
             spec = cls.fetch_derivate_spec_by_isin(isin, eur_usd=eur_usd)
 
@@ -228,12 +272,13 @@ class DerivativesPortfolio:
                 "fin_rate_pa": 7.5,
                 "status": "Aktiv",
             })
-            existing.add(isin)
-            added_count += 1
+            existing_deriv.add(isin)
+            added_deriv += 1
 
-        if added_count > 0:
+        cls.save_stocks_data({"positions": stock_positions, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
+        if added_deriv > 0:
             cls.save_data(port)
-        return added_count, warnings
+        return added_deriv + len(stock_positions), warnings
 
     @staticmethod
     def calc_intrinsic_cert_price(spec: DerivateSpec, underlying_price: float) -> float:

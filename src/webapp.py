@@ -1102,6 +1102,25 @@ with tab_port:
 
     st.divider()
     active_evals = [x for x in evaluated_list if x.get("status") != "Geschlossen"] if "evaluated_list" in locals() else []
+    stocks_data = DerivativesPortfolio.load_stocks_data()
+    stock_rows = stocks_data.get("positions", [])
+    if stock_rows:
+        st.subheader("📈 Aktien- & ETF-Bestand (Scalable Depot)")
+        df_stocks = pd.DataFrame(stock_rows)
+        tot_inv = float(df_stocks["invested_eur"].sum())
+        tot_val = float(df_stocks["valuation_eur"].sum())
+        tot_pnl = round(tot_val - tot_inv, 2)
+        tot_pct = round(((tot_val / tot_inv) - 1.0) * 100, 2) if tot_inv > 0 else 0.0
+
+        c_s1, c_s2, c_s3 = st.columns(3)
+        c_s1.metric("Einstandswert (FIFO)", f"{tot_inv:,.2f} €")
+        c_s2.metric("Aktueller Marktwert", f"{tot_val:,.2f} €")
+        c_s3.metric("Gesamt G/V (Aktien)", f"{tot_pnl:+,.2f} €", f"{tot_pct:+.2f} %")
+
+        show_cols = ["name", "isin", "shares", "fifo_eur", "current_eur", "invested_eur", "valuation_eur", "pnl_eur", "pnl_pct", "venue"]
+        st.dataframe(df_stocks[[c for c in show_cols if c in df_stocks.columns]], use_container_width=True, hide_index=True)
+        st.divider()
+
     with st.expander("🔌 Scalable CLI (`sc`) Sync, 3-Tranchen-Matrix & Order-Preview", expanded=False):
         if st.button("📥 Bestand via `sc broker holdings` syncen"):
             try:
