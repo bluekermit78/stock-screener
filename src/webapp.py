@@ -1101,6 +1101,7 @@ with tab_port:
         st.info("Noch keine offenen Derivate-Positionen im Logbuch. Übernimm einen Trade direkt aus dem Reiter **'⚡ Derivate & Scalable-Assistent'** oder trage ihn unten manuell ein.")
 
     st.divider()
+    active_evals = [x for x in evaluated_list if x.get("status") != "Geschlossen"] if "evaluated_list" in locals() else []
     with st.expander("🔌 Scalable CLI (`sc`) Sync, 3-Tranchen-Matrix & Order-Preview", expanded=False):
         if st.button("📥 Bestand via `sc broker holdings` syncen"):
             try:
