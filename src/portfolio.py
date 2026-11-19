@@ -102,9 +102,15 @@ class DerivativesPortfolio:
             pass
         return None
 
-    @staticmethod
-    def run_sc_json(args: list[str]):
-        cmd = ["sc"] + args + ["--json"]
+    @classmethod
+    def run_sc_json(cls, args: list[str]):
+        if args[:2] == ["broker", "holdings"]:
+            remote_args = ["holdings"]
+        elif args[:3] == ["broker", "trade", "sell"]:
+            remote_args = ["preview-sell"] + [a for a in args[3:] if a != "--json"]
+        else:
+            raise ValueError(f"Nicht freigegebener Remote-Befehl: {args}")
+        cmd = ["ssh", "-i", "/root/.ssh/id_ed25519_sc", "-o", "BatchMode=yes", "scbot@192.168.78.130", "/opt/sc-wrapper/run_sc.sh"] + remote_args
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(res.stdout)
 
@@ -187,7 +193,7 @@ class DerivativesPortfolio:
         for tranche in tranches:
             if tranche.sell_quantity <= 0:
                 continue
-            cmd = ["sc", "broker", "order", "sell", "--isin", isin, "--quantity", str(tranche.sell_quantity),
+            cmd = ["sc", "broker", "trade", "sell", "--isin", isin, "--quantity", str(tranche.sell_quantity),
                    "--order-type", "limit", "--limit-price", f"{tranche.limit_price:.2f}", "--json"]
             proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
             data = json.loads(proc.stdout)
