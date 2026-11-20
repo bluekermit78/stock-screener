@@ -180,18 +180,16 @@ class DerivativesPortfolio:
         holdings_data = cls.run_sc_json(["broker", "holdings"])
         warnings: list[str] = []
 
-        res_obj = ((holdings_data.get("data") or {}).get("result")) if isinstance(holdings_data, dict) else {}
-        raw_positions = res_obj.get("items", []) if isinstance(res_obj, dict) else []
+        res_obj = ((holdings_data.get("data") or {}).get("result")) if isinstance(holdings_data, dict) else None
+        if not isinstance(res_obj, dict) or not isinstance(res_obj.get("items"), list):
+            raise RuntimeError("Unerwartete Antwort von `sc broker holdings` (kein items-Array).")
 
+        raw_positions = res_obj["items"]
         port = cls.load_data()
-        existing_deriv = {
-            str(p.get("wkn", "")).strip().upper()
-            for p in port.get("positions", [])
-            if p.get("status") != "Geschlossen"
-        }
+        positions = port.get("positions", [])
 
         stock_positions = []
-        added_deriv = 0
+        sc_deriv_map: dict[str, dict] = {}
 
         for item in raw_positions:
             if not isinstance(item, dict):
@@ -229,12 +227,44 @@ class DerivativesPortfolio:
                     "venue": str(item.get("quote_venue") or "-"),
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 })
-                continue
+            else:
+                sc_deriv_map[isin] = {
+                    "isin": isin,
+                    "name": name_str,
+                    "qty": qty,
+                    "fifo_eur": fifo_eur,
+                }
 
+        isin_re = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
+        existing_deriv: set[str] = set()
+        changed = False
+
+        for pos in positions:
+            if pos.get("status") == "Geschlossen":
+                continue
+            wkn_key = str(pos.get("wkn", "")).strip().upper()
+            if wkn_key in sc_deriv_map:
+                existing_deriv.add(wkn_key)
+                sc_item = sc_deriv_map[wkn_key]
+                if int(pos.get("shares", 0)) != sc_item["qty"]:
+                    pos["shares"] = sc_item["qty"]
+                    changed = True
+                if sc_item["fifo_eur"] > 0 and round(float(pos.get("entry_cert_eur", 0.0)), 2) != round(sc_item["fifo_eur"], 2):
+                    pos["entry_cert_eur"] = round(sc_item["fifo_eur"], 2)
+                    changed = True
+            elif isin_re.match(wkn_key):
+                pos["status"] = "Geschlossen"
+                pos["closed_at"] = date.today().isoformat()
+                changed = True
+                warnings.append(f"Verkauft/Geschlossen: {wkn_key} ({pos.get('ticker', '-')})")
+
+        added_deriv = 0
+        for isin, sc_item in sc_deriv_map.items():
             if isin in existing_deriv:
                 continue
-
-            entry_cert = fifo_eur if fifo_eur > 0 else 1.0
+            qty = sc_item["qty"]
+            name_str = sc_item["name"]
+            entry_cert = sc_item["fifo_eur"] if sc_item["fifo_eur"] > 0 else 1.0
             parsed = cls._parse_sc_derivative_name(name_str, isin)
             spec = cls.fetch_derivate_spec_by_isin(isin, eur_usd=eur_usd)
 
@@ -251,7 +281,7 @@ class DerivativesPortfolio:
             )
             init_u = round(ko_val * (1.08 if is_long else 0.92), 2) if ko_val else round(entry_cert * 10.0, 2)
 
-            port["positions"].append({
+            positions.append({
                 "id": str(uuid.uuid4())[:8],
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "ticker": ticker,
@@ -277,9 +307,11 @@ class DerivativesPortfolio:
             })
             existing_deriv.add(isin)
             added_deriv += 1
+            changed = True
 
         cls.save_stocks_data({"positions": stock_positions, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
-        if added_deriv > 0:
+        if changed:
+            port["positions"] = positions
             cls.save_data(port)
         return added_deriv + len(stock_positions), warnings
 
